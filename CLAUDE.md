@@ -140,7 +140,8 @@ Customer-facing: `GET /v1/echo` (billable), `GET /v1/usage`, `GET /v1/invoices`,
 `GET /v1/invoices/{number}`. The account endpoints authenticate and enforce like any other
 but are **not billed** -- a customer is not charged for asking what they owe, which is the
 same objection that ruled out billing a request refused for hitting a spending limit.
-Admin/demo surface is under `/admin`.
+Admin/demo surface is under `/admin`: create a customer, issue/list/revoke keys, change
+plan, set **and remove** a spending limit, read enforcement state.
 
 ## Decisions already made
 

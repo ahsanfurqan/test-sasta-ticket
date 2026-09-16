@@ -295,6 +295,68 @@ _LIVE_LIMIT = text(
 )
 
 
+_DELETE_LIMIT = text(
+    """
+    DELETE FROM spending_limits sl
+     USING billing_periods bp
+     WHERE bp.id = sl.billing_period_id
+       AND sl.customer_id = :customer_id
+       AND bp.period_month = :period_month
+    RETURNING sl.limit_paisa
+    """
+)
+
+
+async def remove_spending_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis: aioredis.Redis,
+    *,
+    customer_id: str,
+    now: datetime | None = None,
+) -> dict:
+    """Remove a customer's spending limit for the current period.
+
+    Order matters, and it is the opposite of the publish path. Redis is cleared FIRST, then
+    the row is deleted:
+
+      * Redis first, then Postgres -- a crash in between leaves no threshold but a surviving
+        row, so the sweep recomputes and the limit comes BACK. The operator sees it is still
+        there and retries. Wrong, but visible and conservative.
+      * Postgres first, then Redis -- a crash in between leaves a threshold enforcing a limit
+        that no longer exists anywhere, and no row for the sweep to correct it from. The
+        customer is refused forever by a limit nobody can find.
+
+    The sweep can also re-publish the key between the two statements. Same outcome: the limit
+    reappears, visibly, and a retry clears it. Failing toward "the limit is still on" is the
+    safe direction for a control whose whole purpose is to stop spending.
+    """
+    now = now or datetime.now(UTC)
+    bounds = period_bounds(usage_repo.period_for(now))
+    period = usage_repo.period_for(now)
+
+    await redis.delete(usage_repo.threshold_key(customer_id, period.label))
+
+    async with session_factory() as session:
+        removed = (
+            await session.execute(
+                _DELETE_LIMIT, {"customer_id": customer_id, "period_month": bounds.month}
+            )
+        ).scalar_one_or_none()
+        await session.commit()
+
+    return {
+        "customer_id": customer_id,
+        "billing_period": period.label,
+        "removed": removed is not None,
+        "previous_limit_paisa": int(removed) if removed is not None else None,
+        "note": (
+            "requests are served without a spending cap for the rest of this period. The "
+            "monthly fee and any usage already incurred are still owed -- removing a limit "
+            "does not remove a charge."
+        ),
+    }
+
+
 async def limit_conflict(
     session_factory: async_sessionmaker[AsyncSession],
     customer_id: str,

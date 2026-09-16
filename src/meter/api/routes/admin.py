@@ -229,6 +229,23 @@ async def set_spending_limit(customer_id: str, body: SetSpendingLimit, context: 
         ) from exc
 
 
+@router.delete("/customers/{customer_id}/spending-limit", dependencies=[Admin])
+async def remove_spending_limit(customer_id: str, context: HotPath) -> dict:
+    """Remove a customer's spending limit for the current period.
+
+    This existed nowhere until a 409 from the plan-change guard told operators to "remove
+    the spending limit" as a way out -- and there was no way to do it. PUT rejects a
+    non-positive limit (the column is CHECK (limit_paisa > 0)), so a limit, once set, could
+    never be taken off. The remedy the error suggested was not reachable.
+
+    Removing a limit does not remove a charge: the monthly fee and any usage already
+    incurred are still owed. It stops the cap being enforced, nothing more.
+    """
+    return await provisioning.remove_spending_limit(
+        context.sessions, context.cache, customer_id=customer_id
+    )
+
+
 @router.get("/customers/{customer_id}/usage", dependencies=[Admin])
 async def usage(customer_id: str, context: HotPath) -> dict:
     """The two integers the hot path compares, exactly as it sees them.

@@ -512,3 +512,97 @@ class TestAnImpossibleLimitIsNotReportedAsAnExhaustedOne:
         assert httpx.get(
             f"{base_url}/v1/usage", headers={"X-API-Key": customer["api_key"]}, timeout=20
         ).status_code == 200
+
+
+class TestRemovingASpendingLimit:
+    """A limit, once set, could not be taken off.
+
+    There was no DELETE, and PUT rejects a non-positive limit because the column is
+    CHECK (limit_paisa > 0). So the remedy the plan-change guard suggests -- "remove the
+    spending limit" -- named an operation the API could not perform. An error message that
+    prescribes an impossible fix is worse than one that prescribes nothing.
+    """
+
+    @staticmethod
+    def _limited_customer(base_url, limit_paisa: int = 1_000_000) -> dict:
+        customer = httpx.post(
+            f"{base_url}/admin/customers",
+            json={"name": f"remove-limit-{id(object())}", "plan": "Growth"},
+            timeout=20,
+        ).json()
+        httpx.put(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit",
+            json={"limit_paisa": limit_paisa},
+            timeout=20,
+        )
+        return customer
+
+    def test_it_reports_what_was_removed(self, base_url):
+        customer = self._limited_customer(base_url)
+        body = httpx.delete(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit", timeout=20
+        ).json()
+
+        assert body["removed"] is True
+        assert body["previous_limit_paisa"] == 1_000_000
+        # Removing a cap is not forgiving a charge, and the response says so -- the fee for
+        # the days already spent on the plan is still owed.
+        assert "still owed" in body["note"]
+
+    def test_removing_a_limit_that_is_not_set_is_not_an_error(self, base_url):
+        """Idempotent: an operator clearing a limit twice, or clearing one that expired with
+        the period, gets the same answer rather than a 404 to interpret."""
+        customer = httpx.post(
+            f"{base_url}/admin/customers",
+            json={"name": f"no-limit-remove-{id(object())}", "plan": "Growth"},
+            timeout=20,
+        ).json()
+        response = httpx.delete(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit", timeout=20
+        )
+
+        assert response.status_code == 200
+        assert response.json()["removed"] is False
+
+    def test_it_actually_unblocks_a_customer_stuck_on_an_impossible_limit(self, base_url):
+        """The case the guard's 409 points at. This is the whole reason the endpoint exists,
+        so it is tested end to end rather than by inspecting the row."""
+        customer = self._limited_customer(base_url)
+        httpx.post(
+            f"{base_url}/admin/customers/{customer['customer_id']}/plan",
+            json={"plan": "Scale", "acknowledge_limit_conflict": True},
+            timeout=20,
+        )
+        subprocess.run(
+            ["python", "-m", "meter.pipeline.cli", "thresholds"],
+            capture_output=True, timeout=180,
+        )
+        headers = {"X-API-Key": customer["api_key"]}
+        assert httpx.get(f"{base_url}/v1/echo", headers=headers, timeout=20).status_code == 402
+
+        httpx.delete(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit", timeout=20
+        )
+
+        assert httpx.get(f"{base_url}/v1/echo", headers=headers, timeout=20).status_code == 200
+        limit = httpx.get(f"{base_url}/v1/usage", headers=headers, timeout=20).json()[
+            "spending_limit"
+        ]
+        assert limit["serving"] is True
+        assert limit["unsatisfiable"] is False
+
+    def test_the_sweep_does_not_resurrect_a_removed_limit(self, base_url):
+        """The row is gone, so there is nothing for the sweep to recompute from. If the
+        delete ordering were reversed, a surviving row would republish the threshold and the
+        limit would silently come back."""
+        customer = self._limited_customer(base_url)
+        headers = {"X-API-Key": customer["api_key"]}
+        httpx.delete(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit", timeout=20
+        )
+        subprocess.run(
+            ["python", "-m", "meter.pipeline.cli", "thresholds"],
+            capture_output=True, timeout=180,
+        )
+
+        assert httpx.get(f"{base_url}/v1/echo", headers=headers, timeout=20).status_code == 200
