@@ -135,6 +135,42 @@ make redis-cli   # redis-cli shell
 API is on `http://localhost:8000`. Auth is `X-API-Key`. The dev key lives in `.env`
 (copy `.env.example`).
 
+## Decisions already made
+
+All 11 open questions are resolved. Full reasoning, alternatives, costs and breaking points
+live in `docs/adr/` — this table is the summary, not the source of truth. **Do not re-decide
+any of these without a superseding ADR.**
+
+| # | Decision | ADR |
+|---|---|---|
+| Pricing shape | A **versioned price list** is the pricing primitive. Plans are lists many customers share; a negotiated deal is a list with one customer on it. No override mechanism — rating has exactly one kind of input. Versions are immutable once referenced. | 0005 |
+| Plan change | Fee **and** included allowance prorate by **whole days**. Change day belongs to the new plan. Each segment rated against its own allowance and ladder. | 0006 |
+| Rounding | **The customer wins the fraction:** fees round down, allowances round up. Applied once, at the proration boundary. | 0006 |
+| Billable request | We authenticated it **and** processed it: `2xx` and client `4xx`. Never `401`/`403`, never our `5xx`, never a limit refusal. Capture happens **after** the outcome is known. | 0007 |
+| Limit enforcement | Invert the rupee limit into a **request-count threshold**; the hot path compares two integers. Overshoot budget **~5s**. | 0008 |
+| Limit scope | Caps the **total bill including the monthly fee**. A limit below the plan fee is rejected when set. | 0012 |
+| Timezone | Store UTC; evaluate boundaries in **Asia/Karachi** (+05:00, no DST). | 0009 |
+| Month close | **Reconcile, then issue**, with a bounded grace window as fallback and any shortfall recorded loudly. Late usage **rolls forward** as a labelled prior-period line at its original price version. | 0010 |
+| Redis down | **Fail closed** — `503`, no Postgres fallback. Makes the overshoot bound unconditional; costs full availability. | 0011 |
+| Corrections | **Credit notes**, never edits. Immutability enforced in the schema now; the mechanism is **not built in v1** and is a stated gap. | 0013 |
+| Latency budget | Capture adds **≤1ms at p99**, measured with capture toggled off and on. | 0014 |
+| API keys | **Multiple** per customer, stored **hashed**, shown once. Revocation effective **within 30s**. | 0015 |
+| Retention | Per-request rows **90 days**; rollups long-term, written at aggregation time. Usage table partitioned so expiry is a partition drop. | 0016 |
+
+### Consequences worth holding in mind
+
+Three of these have sharp edges that will surface in review. They are recorded in the ADRs
+and are deliberate, not oversights:
+
+- **The band ladder restarts at each plan-change segment** (0006). A customer whose usage
+  straddles an upgrade can pay more than the same usage would have cost on either plan alone.
+- **A mid-month upgrade can shrink remaining limit headroom, or exhaust it instantly** (0012),
+  because the larger prorated fee consumes more of the same cap — as a direct result of an
+  action the customer took expecting more capacity.
+- **A Redis restart that returns healthy-but-empty must not serve a single request against a
+  zero counter** (0011). Counters are rebuilt from Postgres and marked authoritative before
+  traffic is accepted. Rebuild time under load is unmeasured and is the main risk to 0011.
+
 ## Decisions are recorded in `docs/adr/`
 
 Every non-obvious choice gets an ADR. Copy `docs/adr/0000-template.md`. An ADR states:
@@ -150,8 +186,9 @@ is how it gets resolved, and the open question is updated to point at it.
 
 This repository is built in sessions with hard scope boundaries. Current state:
 
-- **Session 1 (done):** context, agents, ADR process, open questions, running skeleton,
-  one echo endpoint proving the stack talks to Postgres and Redis.
+- **Session 1 (done):** context, agents, ADR process, running skeleton, one echo endpoint
+  proving the stack talks to Postgres and Redis. All 11 open questions resolved across
+  ADRs 0005-0016, so the schema and the pricing math are both unblocked.
 - **Not yet built, deliberately:** billing math, usage recording, the live usage endpoint,
   spending limits, invoicing. No function in this repo calculates money yet.
 

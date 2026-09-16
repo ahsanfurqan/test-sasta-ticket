@@ -1,8 +1,13 @@
 # Open questions
 
 The brief leaves these open, some because the teams genuinely have not decided and some
-because what the teams asked for pulls against itself. **Nothing here is resolved.** Each
-entry lists the options and what each one costs.
+because what the teams asked for pulls against itself. Each entry lists the options and what
+each one costs.
+
+**All 11 are now resolved**, each by an ADR in `docs/adr/`. The options and trade-offs below
+are kept deliberately: the reasoning that was rejected is part of the record, and an ADR
+whose alternatives cannot be checked is a rationalisation. The resolution note under each
+heading says which ADR closed it and what it cost.
 
 An open question is closed by writing an ADR in `docs/adr/` and updating the entry to point
 at it. It is *not* closed by an implementation quietly assuming an answer. If code needs a
@@ -74,7 +79,14 @@ not just a billing rule — capture before the handler and you cannot know the s
 
 ---
 
-## 3. 🟡 PARTLY RESOLVED — Spending limit: exactly what is being limited, and how far can it overshoot?
+## 3. ✅ RESOLVED — Spending limit: exactly what is being limited, and how far can it overshoot?
+
+> **Fully resolved.** Overshoot: [ADR-0008](adr/0008-spending-limit-precomputed-threshold.md)
+> — ~5 seconds, via inverting the rupee limit into a request-count threshold so the hot path
+> compares two integers. Scope: [ADR-0012](adr/0012-spending-limit-covers-total-bill.md) —
+> the limit caps the **total bill including the monthly fee**; a limit below the plan's fee
+> is rejected when set. Note the surprising case recorded there: a mid-month upgrade can
+> *shrink* remaining headroom, and can exhaust the limit immediately.
 
 > **Overshoot resolved by [ADR-0008](adr/0008-spending-limit-precomputed-threshold.md):
 > ~5 seconds**, achieved by inverting the rupee limit into a request-count threshold so
@@ -106,7 +118,15 @@ number, not a mechanism.
 
 ---
 
-## 4. 🟡 When is a month closed, and what happens to usage that arrives after?
+## 4. ✅ RESOLVED — When is a month closed, and what happens to usage that arrives after?
+
+> **Timezone:** [ADR-0009](adr/0009-billing-boundaries-in-asia-karachi.md) — stored UTC,
+> boundaries evaluated in **Asia/Karachi** (constant +05:00, no DST). This unblocks
+> ADR-0006.
+> **Close policy:** [ADR-0010](adr/0010-month-close-reconcile-then-issue.md) — reconcile
+> first, then issue, with a bounded grace window as fallback and the shortfall recorded
+> loudly. Late usage **rolls forward** onto the next invoice as a labelled prior-period
+> line, priced at the price list version in effect when it was incurred.
 
 Invoice immutability makes this unavoidable rather than a detail.
 
@@ -128,7 +148,12 @@ invoice timing dependent on the health of the pipeline, which Finance will not e
 
 ---
 
-## 5. 🟡 Invoices never change — so how do we correct a mistake?
+## 5. ✅ RESOLVED — Invoices never change — so how do we correct a mistake?
+
+> **Resolved by [ADR-0013](adr/0013-invoice-corrections-by-credit-note.md).** Policy now,
+> mechanism later: corrections are **credit notes**, never edits. Schema-level immutability
+> is enforced from the first invoice migration; the credit-note mechanism is **not built in
+> v1** and is recorded as a known gap. Until then, errors are handled manually by Finance.
 
 Finance is unambiguous: a number that moves after it has been sent is unacceptable. But
 bugs exist, and at some point an issued invoice will be wrong.
@@ -195,7 +220,15 @@ it later means migrating the pricing tables while invoices reference them.
 
 ---
 
-## 8. 🟡 If Redis is unavailable, do we fail open or fail closed?
+## 8. ✅ RESOLVED — If Redis is unavailable, do we fail open or fail closed?
+
+> **Resolved by [ADR-0011](adr/0011-fail-closed-when-redis-unavailable.md): fail closed.**
+> `503` with `Retry-After`; no Postgres fallback write path. This makes ADR-0008's overshoot
+> bound **unconditional** — there is no state in which we serve past a limit unknowingly.
+> **Accepted cost, stated plainly:** a Redis blip is a full outage for every customer,
+> including those with no limit, and Redis becomes a hard availability dependency.
+> **Open sub-risk:** counter rebuild time from Postgres is unmeasured, and a Redis that
+> returns healthy-but-empty must not serve against a zero counter.
 
 Counters and limit thresholds live in Redis. If it is down or has restarted with an empty
 keyspace, the hot path cannot check a spending limit.
@@ -213,7 +246,12 @@ limit-bound customers specifically — which costs a branch on the hot path.
 
 ---
 
-## 9. 🟡 What is the latency budget for usage capture?
+## 9. ✅ RESOLVED — What is the latency budget for usage capture?
+
+> **Resolved by [ADR-0014](adr/0014-usage-capture-latency-budget.md): ≤1ms added at p99**,
+> measured with capture toggled off and on at a stated concurrency. Note the tension it
+> records with ADR-0007: capture happens after the response, so it may constrain throughput
+> rather than latency, and the measurement method has to account for that.
 
 "Must not add noticeable delay" is not a number. Until it is one, `hot-path` cannot tell
 whether a change is acceptable, and "what did this add to p99?" has no threshold to fail
@@ -222,7 +260,13 @@ constraint testable; without one, every optimisation argument is an opinion.
 
 ---
 
-## 10. 🟢 API key lifecycle
+## 10. ✅ RESOLVED — API key lifecycle
+
+> **Resolved by [ADR-0015](adr/0015-api-key-model.md).** Multiple active keys per customer
+> (rotation without downtime), stored **hashed** with a non-secret prefix, shown once at
+> creation. Revocation effective **within 30s**, bounded by the auth cache TTL. Usage from a
+> key that was valid when served is billed. Immediate invalidation via pub/sub is the
+> deliberate v2.
 
 Not mentioned in the brief at all, and every one of these has a billing consequence.
 
@@ -233,7 +277,14 @@ And: does usage from a revoked key still get billed?
 
 ---
 
-## 11. 🟢 Usage data retention
+## 11. ✅ RESOLVED — Usage data retention
+
+> **Resolved by [ADR-0016](adr/0016-usage-retention-and-partitioning.md).** Per-request rows
+> **90 days**; rollups (per customer, per day, per price list version, per segment) kept
+> long-term and written by `pipeline` at aggregation time, not derived on demand. Usage table
+> partitioned by period so expiry is a partition drop. **Consequence:** after 90 days a
+> charge is explainable but not itemisable, and a rollup bug found on day 91 is
+> unrecoverable.
 
 Invoices must be explainable, which implies keeping enough detail to re-derive any charge.
 For how long? Per-request rows for 7 years is a very large table; aggregated rollups are
