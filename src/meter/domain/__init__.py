@@ -8,11 +8,14 @@ not by discipline.
 Time is an input, never datetime.now(). A rating function that reads the clock cannot be
 property-tested and cannot re-derive a historical charge.
 
-Nothing here yet, deliberately -- no function in this repo calculates money in session 1.
-Next session, owned by billing-domain:
+Modules, owned by billing-domain:
 
-    plans.py       plan / band value objects, versioned price lists
+    plans.py       plan / band value objects, versioned price lists (ADR-0005)
+    catalogue.py   the launch price lists as seed data -- NOT the runtime source of truth
     rating.py      the marginal band ladder: quantity -> itemised charge
-    proration.py   mid-month plan change (blocked on open question #1)
+    proration.py   mid-month plan change, whole-day (ADR-0006)
+
+Still to come:
+
     invoice.py     invoice value objects and immutability
 """
