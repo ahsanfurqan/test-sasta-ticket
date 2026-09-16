@@ -172,9 +172,11 @@ def test_growth_threshold_never_lets_a_customer_exceed_their_limit(budget):
         ).total_paisa
 
 
-@given(quantity=quantities)
+@given(quantity=st.integers(min_value=6_000_000, max_value=50_000_000))
 def test_a_scale_customer_never_pays_more_than_a_starter_customer_would(quantity):
     """Sanity on the catalogue itself: at high volume the expensive-looking plan is cheaper.
-    Not a law of the ladder -- a claim about how we priced it, worth knowing if it breaks."""
-    assume(quantity >= 6_000_000)
+    Not a law of the ladder -- a claim about how we priced it, worth knowing if it breaks.
+
+    The range is generated, not filtered: an assume() here discarded ~88% of examples, which
+    both slows the test and skews what it actually explores."""
     assert rate(quantity, SCALE_V1).total_paisa < rate(quantity, STARTER_V1).total_paisa
