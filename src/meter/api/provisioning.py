@@ -285,6 +285,57 @@ async def assign_plan(
     return assignment_id
 
 
+_LIVE_LIMIT = text(
+    """
+    SELECT sl.limit_paisa
+      FROM spending_limits sl
+      JOIN billing_periods bp ON bp.id = sl.billing_period_id
+     WHERE sl.customer_id = :customer_id AND bp.period_month = :period_month
+    """
+)
+
+
+async def limit_conflict(
+    session_factory: async_sessionmaker[AsyncSession],
+    customer_id: str,
+    version_id: str,
+    at: datetime,
+) -> dict | None:
+    """Would moving to this plan make the customer's spending limit impossible to meet?
+
+    `PUT /spending-limit` already refuses a limit below the period's fee. A plan change is
+    the OTHER way to reach the same state, and it was unguarded -- so a customer could set a
+    workable limit, upgrade, and be refused from the next request with no warning and no
+    explanation. Same invariant, two ways to violate it (ADR-0012).
+
+    Returns the numbers if there is a conflict, or None. Deciding what to do about it is the
+    caller's, because refusing outright blocks engineering on finance.
+    """
+    bounds = period_bounds(usage_repo.period_for(at))
+    async with session_factory() as session:
+        limit_paisa = (
+            await session.execute(
+                _LIVE_LIMIT, {"customer_id": customer_id, "period_month": bounds.month}
+            )
+        ).scalar_one_or_none()
+    if limit_paisa is None:
+        return None
+
+    price_list = await load_price_list(session_factory, version_id)
+    days = _remaining_days(bounds, at)
+    prorated = proration.prorate(price_list, days, bounds.days_in_month)
+
+    if prorated.monthly_fee_paisa <= limit_paisa:
+        return None
+    return {
+        "limit_paisa": int(limit_paisa),
+        "prorated_fee_paisa": prorated.monthly_fee_paisa,
+        "plan": price_list.label,
+        "days": days,
+        "days_in_month": bounds.days_in_month,
+    }
+
+
 async def change_plan(
     session_factory: async_sessionmaker[AsyncSession],
     customer_id: str,

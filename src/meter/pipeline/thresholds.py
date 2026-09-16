@@ -66,6 +66,31 @@ class Threshold:
     def redis_key(self) -> str:
         return keys.limit_threshold(self.customer_id, self.period_month)
 
+    @property
+    def unsatisfiable(self) -> bool:
+        """The prorated fees alone exceed the limit, so no amount of refusing can honour it.
+
+        This is a materially different fact from "you have spent your limit", and conflating
+        the two is why a customer can be cut off with no idea why. The monthly fee is owed
+        for the days they were on the plan whether or not we serve them -- so once the fee
+        component passes the limit, refusing traffic cannot bring the bill back under it. We
+        still refuse, because it stops the overage growing, but the customer must be told
+        that their limit became impossible rather than that they used it up.
+
+        ADR-0012 predicted the route in: an upgrade whose prorated fee consumes the whole
+        limit, taken by a customer expecting more capacity.
+        """
+        return self.fee_component_paisa > self.limit_paisa
+
+    #: What the hot path reads. A negative sentinel means unsatisfiable, so enforcement can
+    #: tell the two states apart without a second Redis round trip -- the budget in ADR-0020
+    #: is spent on three round trips already, and this fact rides along in one of them.
+    UNSATISFIABLE = -1
+
+    @property
+    def redis_value(self) -> int:
+        return self.UNSATISFIABLE if self.unsatisfiable else self.threshold_requests
+
 
 class NoPlanForLimit(RuntimeError):
     """A spending limit on a customer who is on no plan in that period.
@@ -128,10 +153,11 @@ async def compute(
     threshold = usage_elsewhere + allowed_here
     fee_component = other_fees + prorated_current.monthly_fee_paisa
 
-    if threshold == 0:
-        # ADR-0012 requires this to be rejected when the limit is SET, with a message
-        # naming the fee. By the time it reaches here it is already stored, so the loudest
-        # thing available is a log line that names the same number.
+    if fee_component > limit_paisa:
+        # ADR-0012 requires an unsatisfiable limit to be rejected when it is SET. Reaching
+        # here means it became unsatisfiable AFTERWARDS -- almost always a plan change whose
+        # prorated fee swallowed the limit. The customer is about to be refused for a reason
+        # they did not cause and cannot fix by sending less traffic.
         logger.error(
             "customer %s has a limit of %s for %s, which is below the prorated fee "
             "component of %s: they will be refused from their first request",
@@ -195,7 +221,10 @@ async def publish(
     still old -- whereas the reverse order would leave enforcement running on a stale
     number that the database claims is fresh.
     """
-    await redis.set(threshold.redis_key, threshold.threshold_requests)
+    # The Redis value carries the sentinel; the Postgres column is CHECK (>= 0) and stores
+    # the plain count. The audit trail records what was computed; Redis records what to
+    # enforce, and those are allowed to differ in exactly this one way.
+    await redis.set(threshold.redis_key, threshold.redis_value)
     await conn.execute(
         text(
             """

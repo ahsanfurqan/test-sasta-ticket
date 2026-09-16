@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 import time
 
@@ -356,3 +357,158 @@ def test_overshoot_at_the_moment_of_crossing_is_bounded_by_concurrency(base_url,
         "overshoot must be bounded by in-flight requests"
     )
     assert billed == served, "every served request billed, every refused request not"
+
+
+class TestAnUpgradeCannotSilentlyMakeTheLimitImpossible:
+    """ADR-0012 predicted this and the mitigation was never built, so it happened.
+
+    A customer set a Rs. 10,000 limit on Growth, upgraded to Scale, and was refused from
+    their next request -- because Scale's prorated fee for half a month is Rs. 45,000, four
+    and a half times their whole limit. They took an action expecting MORE capacity and got
+    none, with no warning and no explanation.
+
+    The invariant "a limit that cannot be satisfied is not a limit" was enforced on
+    PUT /spending-limit and not on POST /plan. Same invariant, two ways to violate it.
+    """
+
+    @staticmethod
+    def _growth_customer_with_a_small_limit(base_url) -> dict:
+        customer = httpx.post(
+            f"{base_url}/admin/customers",
+            json={"name": f"limit-conflict-{id(object())}", "plan": "Growth"},
+            timeout=20,
+        ).json()
+        limit = httpx.put(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit",
+            json={"limit_paisa": 1_000_000},  # Rs. 10,000 -- workable on Growth
+            timeout=20,
+        )
+        assert limit.status_code == 200, limit.text
+        assert limit.json()["request_threshold"] > 0, "the limit must be workable to start"
+        return customer
+
+    def test_the_upgrade_is_refused_with_both_numbers_named(self, base_url):
+        customer = self._growth_customer_with_a_small_limit(base_url)
+
+        response = httpx.post(
+            f"{base_url}/admin/customers/{customer['customer_id']}/plan",
+            json={"plan": "Scale"},
+            timeout=20,
+        )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        # Naming both numbers is the point: "would make the limit impossible" without them
+        # leaves the operator guessing which way to move which value.
+        assert detail["limit_paisa"] == 1_000_000
+        assert detail["prorated_fee_paisa"] > detail["limit_paisa"]
+        assert "Rs. 10,000.00" in detail["explanation"]
+        assert detail["resolve_by"], "a refusal with no way forward is worse than none"
+
+    def test_it_can_be_overridden_deliberately(self, base_url):
+        """A hard block would put engineering's upgrade behind finance's limit. The
+        acknowledgement makes it a decision rather than a dead end."""
+        customer = self._growth_customer_with_a_small_limit(base_url)
+
+        response = httpx.post(
+            f"{base_url}/admin/customers/{customer['customer_id']}/plan",
+            json={"plan": "Scale", "acknowledge_limit_conflict": True},
+            timeout=20,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["limit_conflict_acknowledged"] is True
+
+    def test_raising_the_limit_first_lets_the_upgrade_through(self, base_url):
+        customer = self._growth_customer_with_a_small_limit(base_url)
+        httpx.put(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit",
+            json={"limit_paisa": 20_000_000},  # Rs. 200,000, comfortably over Scale's fee
+            timeout=20,
+        )
+
+        response = httpx.post(
+            f"{base_url}/admin/customers/{customer['customer_id']}/plan",
+            json={"plan": "Scale"},
+            timeout=20,
+        )
+        assert response.status_code == 200
+        assert response.json()["limit_conflict_acknowledged"] is False
+
+    def test_a_customer_with_no_limit_is_never_blocked_from_upgrading(self, base_url):
+        customer = httpx.post(
+            f"{base_url}/admin/customers",
+            json={"name": f"no-limit-{id(object())}", "plan": "Growth"},
+            timeout=20,
+        ).json()
+
+        response = httpx.post(
+            f"{base_url}/admin/customers/{customer['customer_id']}/plan",
+            json={"plan": "Scale"},
+            timeout=20,
+        )
+        assert response.status_code == 200
+
+
+class TestAnImpossibleLimitIsNotReportedAsAnExhaustedOne:
+    """'You used up your limit' and 'your limit became impossible' are different facts, and
+    only one of them is something the customer did.
+
+    The distinction matters because refusing traffic CANNOT bring the bill under the limit
+    once the prorated fee alone exceeds it -- the fee is owed for the days they were on the
+    plan whether or not we serve a single request. We still refuse, to stop the overage
+    growing, but telling them they exhausted a limit they never got to use is simply false.
+    """
+
+    @staticmethod
+    def _stuck_customer(base_url) -> dict:
+        customer = httpx.post(
+            f"{base_url}/admin/customers",
+            json={"name": f"unsatisfiable-{id(object())}", "plan": "Growth"},
+            timeout=20,
+        ).json()
+        httpx.put(
+            f"{base_url}/admin/customers/{customer['customer_id']}/spending-limit",
+            json={"limit_paisa": 1_000_000},
+            timeout=20,
+        )
+        httpx.post(
+            f"{base_url}/admin/customers/{customer['customer_id']}/plan",
+            json={"plan": "Scale", "acknowledge_limit_conflict": True},
+            timeout=20,
+        )
+        subprocess.run(
+            ["python", "-m", "meter.pipeline.cli", "thresholds"],
+            capture_output=True, timeout=180,
+        )
+        return customer
+
+    def test_the_usage_endpoint_explains_why_rather_than_showing_an_exhausted_limit(
+        self, base_url
+    ):
+        customer = self._stuck_customer(base_url)
+        body = httpx.get(
+            f"{base_url}/v1/usage", headers={"X-API-Key": customer["api_key"]}, timeout=20
+        ).json()["spending_limit"]
+
+        assert body["unsatisfiable"] is True
+        assert body["serving"] is False
+        assert body["why"], "the one place they can find out why must say why"
+        # Not an exhausted count: there is no threshold they could stay under.
+        assert body["request_threshold"] is None
+
+    def test_the_refusal_names_the_right_reason(self, base_url):
+        customer = self._stuck_customer(base_url)
+        response = httpx.get(
+            f"{base_url}/v1/echo", headers={"X-API-Key": customer["api_key"]}, timeout=20
+        )
+
+        assert response.status_code == 402
+        assert response.json()["reason"] == "limit_unsatisfiable"
+
+    def test_they_can_still_read_their_own_usage_while_refused(self, base_url):
+        """The account endpoints stay reachable, or a cut-off customer cannot discover why."""
+        customer = self._stuck_customer(base_url)
+        assert httpx.get(
+            f"{base_url}/v1/usage", headers={"X-API-Key": customer["api_key"]}, timeout=20
+        ).status_code == 200

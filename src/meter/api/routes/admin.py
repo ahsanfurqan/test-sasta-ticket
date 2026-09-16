@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from meter.api import provisioning
 from meter.api.context import HotPathContext
+from meter.money import format_paisa
 from meter.storage.repositories import keys as keys_repo
 from meter.storage.repositories import usage as usage_repo
 
@@ -77,6 +78,11 @@ class IssueKey(BaseModel):
 
 class ChangePlan(BaseModel):
     plan: str
+    #: ADR-0012's predicted case: an upgrade whose prorated fee swallows the whole spending
+    #: limit. Refused by default, because the customer would be cut off from their next
+    #: request. Not a dead end, though -- in a real organisation finance sets the limit and
+    #: engineering wants the upgrade, and a hard refusal just blocks one team on another.
+    acknowledge_limit_conflict: bool = False
 
 
 class SetSpendingLimit(BaseModel):
@@ -165,6 +171,32 @@ async def change_plan(customer_id: str, body: ChangePlan, context: HotPath) -> d
     version_id = await provisioning.ensure_price_list_version(
         context.sessions, provisioning.PLANS[body.plan]
     )
+
+    conflict = await provisioning.limit_conflict(context.sessions, customer_id, version_id, at)
+    if conflict and not body.acknowledge_limit_conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "this plan change would make the spending limit impossible to meet",
+                "explanation": (
+                    f"{conflict['plan']} for {conflict['days']} of "
+                    f"{conflict['days_in_month']} days costs "
+                    f"{format_paisa(conflict['prorated_fee_paisa'])} in fees alone, which is "
+                    f"more than the spending limit of "
+                    f"{format_paisa(conflict['limit_paisa'])}. The customer would be refused "
+                    f"from their next request, and refusing would not reduce the bill -- the "
+                    f"fee is owed for the days they are on the plan."
+                ),
+                "resolve_by": [
+                    f"raising the spending limit above "
+                    f"{format_paisa(conflict['prorated_fee_paisa'])}",
+                    "removing the spending limit",
+                    "retrying with acknowledge_limit_conflict=true to proceed anyway",
+                ],
+                **conflict,
+            },
+        )
+
     closed, opened = await provisioning.change_plan(
         context.sessions, customer_id, version_id, at
     )
@@ -178,6 +210,7 @@ async def change_plan(customer_id: str, body: ChangePlan, context: HotPath) -> d
             "the period now has two segments; any spending-limit threshold is recomputed "
             "across both by the pipeline, never guessed from one (ADR-0008)"
         ),
+        "limit_conflict_acknowledged": bool(conflict),
     }
 
 

@@ -303,25 +303,37 @@ class UsageMeteringMiddleware:
             # -- so refusing them enforces a cap against a request that can never reach
             # it, and blinds the customer to the limit that just stopped them at the one
             # moment they need to see it. Echo is refused; "what do I owe?" is not.
-            if (
-                threshold_raw is not None
-                and _is_billable_path(scope["path"])
-                and int(counter_raw or 0) >= int(threshold_raw)
-            ):
+            threshold = int(threshold_raw) if threshold_raw is not None else None
+            served = int(counter_raw or 0)
+            # A negative threshold is the UNSATISFIABLE sentinel: the prorated fees alone
+            # exceed the limit, so refusing cannot bring the bill under it. We still refuse
+            # -- it stops the overage growing -- but the customer is told the truth, because
+            # "your limit became impossible" and "you used up your limit" are different
+            # facts and only one of them is something they did.
+            unsatisfiable = threshold is not None and threshold < 0
+            over = threshold is not None and not unsatisfiable and served >= threshold
+
+            if (unsatisfiable or over) and _is_billable_path(scope["path"]):
                 await self._count_nonbillable(period.label, caller.customer_id, LIMIT_REFUSED)
                 await _respond(
                     send,
                     402,
                     {
                         "detail": (
-                            "spending limit reached for this billing period; no further "
+                            "your spending limit is below this period's plan fee, so it "
+                            "cannot be met no matter how little you use. Raise the limit "
+                            "or change plan; requests are refused meanwhile to stop the "
+                            "overage growing."
+                            if unsatisfiable
+                            else "spending limit reached for this billing period; no further "
                             "requests will be served until the limit is raised or the "
                             "period rolls over"
                         ),
+                        "reason": "limit_unsatisfiable" if unsatisfiable else "limit_reached",
                         "billed": False,
                         "period": period.label,
-                        "requests_served": int(counter_raw or 0),
-                        "request_threshold": int(threshold_raw),
+                        "requests_served": served,
+                        "request_threshold": None if unsatisfiable else threshold,
                     },
                 )
                 return

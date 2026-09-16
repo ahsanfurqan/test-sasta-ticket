@@ -96,7 +96,12 @@ async def usage(request: Request, caller: Caller = Authenticated) -> dict:
     )
 
     charge = rate_period(domain_segments)
-    limit = int(threshold) if threshold is not None else None
+    raw_threshold = int(threshold) if threshold is not None else None
+    # A negative threshold is the unsatisfiable sentinel (see meter.pipeline.thresholds).
+    # This endpoint is the one place a cut-off customer can find out WHY, so it must not
+    # report an impossible limit as an ordinary exhausted one.
+    unsatisfiable = raw_threshold is not None and raw_threshold < 0
+    limit = None if unsatisfiable else raw_threshold
 
     return {
         "billing_period": period.label,
@@ -111,7 +116,16 @@ async def usage(request: Request, caller: Caller = Authenticated) -> dict:
         "spending_limit": {
             "request_threshold": limit,
             "requests_remaining": None if limit is None else max(0, limit - counted),
-            "serving": limit is None or counted < limit,
+            "serving": not unsatisfiable and (limit is None or counted < limit),
+            "unsatisfiable": unsatisfiable,
+            "why": (
+                "this period's plan fee alone exceeds your spending limit, so the limit "
+                "cannot be met however little you use. Refusing requests does not reduce "
+                "the fee -- it is owed for the days you were on the plan. Raise the limit "
+                "or change plan."
+                if unsatisfiable
+                else None
+            ),
         },
         "segments": [
             {
