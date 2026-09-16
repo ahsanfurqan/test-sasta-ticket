@@ -285,20 +285,55 @@ Counter stopped at 5,012. All 191 refusals unbilled.
 
 Commercial handed this back explicitly: our call, as long as we can explain it.
 
-**The fee, the included allowance, and the band widths all prorate by whole days.** The
-change day belongs to the new plan. Each segment is rated against its own prorated allowance
-and its own prorated ladder. Band *prices* never scale — a price per request has no time
-dimension.
+### The rule
+
+**Three things prorate by whole days: the monthly fee, the included allowance, and the band
+widths.** Band *prices* never scale — a price per request has no time dimension. The change
+day belongs to the new plan, and each segment is rated against its own prorated ladder.
+
+A customer on Growth who moves to Scale on the 18th of a 30-day month gets:
+
+```
+Growth for 17 of 30 days
+  fee         Rs. 15,000.00 x 17/30  =  Rs. 8,500.00
+  included        500,000 requests   ->     283,334
+  Rs. 0.50 tier   first 500,000      ->     283,334 wide
+  Rs. 0.35 tier   everything above   ->  unchanged, and still Rs. 0.35
+
+Scale for 13 of 30 days
+  fee         Rs. 90,000.00 x 13/30  =  Rs. 39,000.00
+  included      5,000,000 requests   ->   2,166,667
+  Rs. 0.25 tier first 5,000,000      ->   2,166,667 wide
+```
 
 > *"You were on Growth for 17 days and Scale for 13. Everything scaled to match — your fee,
 > your included requests, and each price tier."*
 
-**Rounding: the customer wins the fraction.** Fees round down, allowances and band bounds
-round up. Applied once, at the proration boundary. Across N segments the shortfall is under N
-paisa — stated precisely, because the first version of the ADR said "at most a paisa" and
-that was wrong.
+### What it does to the bill
 
-### The band-width correction
+Two worked cases, both from the running system:
+
+| Usage | Total | of which fees |
+|---|---|---|
+| 100,000 on Growth, 80,000 on Scale | **Rs. 47,500.00** | Rs. 47,500.00 |
+| 700,000 on Growth, 3,000,000 on Scale | **Rs. 444,166.45** | Rs. 47,500.00 |
+
+The fee component is identical in both, because a fee depends on days and not on traffic.
+The whole difference is usage crossing out of the prorated allowances and into the prorated
+tiers. In the light case nothing is charged for usage at all: 100,000 sits inside Growth's
+283,334 and 80,000 inside Scale's 2,166,667.
+
+Note the fee component is **Rs. 47,500**, not the Rs. 105,000 that two full monthly fees
+would be. A plan change never charges two months.
+
+### Rounding
+
+**The customer wins the fraction.** Fees round down; allowances and band bounds round up.
+Applied once, at the proration boundary. Across N segments the shortfall is under N paisa —
+stated precisely, because the first version of this rule said "at most a paisa" and that was
+wrong.
+
+### The correction that made this work
 
 The original decision prorated the fee and the allowance and said nothing about band widths,
 accepting as unavoidable that split usage would cost more. Implementing it showed that was
@@ -319,7 +354,25 @@ quantity two different ways inside one calculation.
 
 **The residual is honest:** splitting is now 20 paisa *cheaper*, because each segment rounds
 its bounds up independently. So "a plan change never changes what you pay for the same usage"
-is still not exactly true — only very nearly — and it grows with segment count.
+is still not exactly true — only very nearly — and the gap grows with segment count.
+
+### Downgrades are the same rule, and they are defensible
+
+Scale → Growth on the 18th, 250,000 requests: **Rs. 57,500.00**, against Rs. 15,000 for
+Growth all month. All of it is fee. The sentence is *"you were on Scale for 17 days, which is
+17/30 of Scale's fee"* — which is fair, because they were.
+
+This was previously assumed to be the hard conversation. It is not, and the reason is the
+band-width correction above: with tiers prorated, usage rarely leaves the allowances, so the
+bill is fee-driven and the fee is easy to justify.
+
+### One guard, because an upgrade can make a limit impossible
+
+Scale's fee for half a month is around Rs. 45,000. A customer with a Rs. 10,000 spending limit
+who upgrades would be refused from their very next request — and **refusing would not reduce
+the bill by one paisa**, because the fee is owed for the days they were on the plan. So
+`POST /plan` refuses with 409 when the new prorated fee exceeds a live limit, naming both
+numbers and three ways forward, and takes `acknowledge_limit_conflict` to proceed anyway.
 
 ### Explaining any charge
 
@@ -330,7 +383,86 @@ line means.
 
 ---
 
-## 8. What we cut, and why that was right
+## 8. How the data ages out
+
+The usage table is the largest object in the system — at the design target, hundreds of
+millions of rows a month. How it is torn down matters as much as how it is written.
+
+### Two tiers, on purpose
+
+| | Kept | Answers |
+|---|---|---|
+| **Per-request rows** (`usage_events`) | 90 days | *which* requests made up this line |
+| **Rollups** (`usage_rollups`) | long-term | *how much* and *at what price* |
+
+The rollup grain is customer × local day × plan segment × price list version × API key. That
+is enough to re-derive any invoice line exactly, because a charge is a function of quantity,
+band and price list version — and the rollup carries all three.
+
+The size difference is the whole argument. This database currently holds **2,645,076
+per-request rows and 1,652 rollups**: three orders of magnitude, for data that answers every
+billing question.
+
+**Rollups are written at aggregation time, never derived on demand.** They have to be correct
+when written, because once the detail expires there is no going back — a rollup bug found on
+day 91 is unrecoverable for that period. That is why the reconciliation test matters more
+than it first appears.
+
+### Teardown is a partition drop, not a DELETE
+
+`usage_events` is range-partitioned by billing period, with bounds at midnight Asia/Karachi
+expressed in UTC:
+
+```
+usage_events_2026_09    18 MB
+usage_events_2026_11   638 MB
+usage_events_default    64 kB
+```
+
+Expiring a period means dropping its partition — a catalogue operation, near-instant
+regardless of row count.
+
+The alternative is what makes this worth designing for. `DELETE FROM usage_events WHERE
+occurred_at < …` over hundreds of millions of rows generates dead tuples faster than
+autovacuum can reclaim them, **on the table with the highest write rate in the system**. That
+is not a tuning problem, it is a predictable outage. Partitioning turns it into a
+`DROP TABLE`.
+
+Partitions are created automatically: the drain calls `ensure_usage_partition` before writing
+into a period it has not seen, so a month boundary never fails for want of somewhere to put
+the row. A `default` partition catches anything outside the declared ranges rather than
+rejecting the insert.
+
+### What we give up at 90 days
+
+After the detail expires, a charge is **explainable but not itemisable**. We can show that
+200,000 requests were charged at Rs. 0.35 under price list version X and prove the
+arithmetic — we cannot list them. A customer disputing a four-month-old invoice gets the
+arithmetic, which is complete and correct, and may not find it satisfying. There is no way to
+prove a negative from a rollup.
+
+The grain is also fixed at the moment the detail goes. "Which of my API keys caused that
+spike in March?" is answerable in April only because `api_key_id` is in the grain. Any
+question needing a finer cut has to be asked before the rows expire, which is why the grain
+was chosen generously rather than minimally.
+
+### The part that is not built
+
+**Nothing drops old partitions.** The policy is decided, the partitioning that makes it cheap
+is in place, and the job that would execute it does not exist. This database still holds
+partitions back to February.
+
+So retention today is a design that is ready rather than a mechanism that runs. On a laptop
+that is invisible; in production it is the difference between a table that ages out and one
+that only grows. The work is small — drop partitions older than the window, after checking no
+open period depends on them — and it is recorded in
+[`docs/known-gaps.md`](docs/known-gaps.md).
+
+Two related things in the same area are also unbuilt: there is no archival of expiring detail
+to cold storage before it is dropped, and the Redis counter keys have no expiry either —
+which is the same shape of problem in the component least able to absorb it.
+
+## 9. What we cut, and why that was right
 
 - **Credit notes.** Finance says an issued number never moves, which implies corrections are
   new documents. The *policy* is decided (ADR-0013) and immutability is enforced and proven;
@@ -350,7 +482,7 @@ line means.
 
 ---
 
-## 9. What it does here, what it would do in production, and where it breaks
+## 10. What it does here, what it would do in production, and where it breaks
 
 ### Measured on this machine
 
@@ -420,7 +552,7 @@ database.
 invoice run, so the 1st of the month becomes a scheduling problem rather than a job. Nothing
 here is parallelised across customers yet.
 
-## 10. Evidence
+## 11. Evidence
 
 232 tests. What they are chosen to prove matters more than the number.
 
@@ -454,7 +586,7 @@ rollups were both right.
 
 ---
 
-## 11. Running it yourself
+## 12. Running it yourself
 
 Everything below is a real call against the running system. There are no fixtures and no
 seeded data — each step does the thing it claims to do.
@@ -635,7 +767,7 @@ cached so that serving a request never has to query the database, and that cache
 the window. It is a stated limit, not an accident — and it is listed in
 [`docs/known-gaps.md`](docs/known-gaps.md) as something to fix before a real leak happens.
 
-## 12. Known gaps
+## 13. Known gaps
 
 In [`docs/known-gaps.md`](docs/known-gaps.md), stated plainly rather than buried here. The
 short version: the latency budget is missed and unfixed, credit notes do not exist, a Redis

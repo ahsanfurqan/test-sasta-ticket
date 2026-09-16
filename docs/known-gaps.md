@@ -67,6 +67,29 @@ shows capture dominating, that is the lever.
 **Also:** `x-usage-capture-us` is the measurement instrument and currently ships on every
 customer response. It should go behind a flag before this is public.
 
+### Nothing drops old usage partitions
+
+[ADR-0016](adr/0016-usage-retention-and-partitioning.md) retains per-request rows for 90 days
+and specifies that expiry is a partition drop rather than a mass `DELETE`. The partitioning
+is in place and creation is automatic — the drain calls `ensure_usage_partition` before
+writing into a period it has not seen. **The job that drops them does not exist.**
+
+This database still holds partitions back to February:
+
+```
+usage_events_2026_02    1184 kB
+usage_events_2026_11     638 MB
+```
+
+So retention is a design that is ready rather than a mechanism that runs. On a laptop it is
+invisible; in production it is the difference between a table that ages out and one that only
+grows — and growth on this table is the thing the partitioning was chosen to survive.
+
+The work is small: drop partitions older than the window, after checking no open billing
+period depends on them. Two related things are also missing — there is no archival of
+expiring detail to cold storage before the drop, so the 90-day boundary is currently a
+deletion rather than a tiering, and nobody has decided whether that is acceptable.
+
 ### A drifted Redis counter is never repaired while Redis is up
 
 The per-period request counter is incremented in the same Redis pipeline as the usage
