@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meter"
+version = "0.1.0"
+description = "Metered billing API - authenticated serving, usage recording, spending limits, exact invoices"
+requires-python = ">=3.12"
+
+# Pinned exactly. This system handles money; a surprise minor-version bump in a
+# serialisation or numeric path is not a risk worth taking for convenience.
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+    "asyncpg==0.30.0",
+    "redis==5.2.1",
+    "pydantic==2.10.3",
+    "pydantic-settings==2.6.1",
+    "alembic==1.14.0",
+    "SQLAlchemy[asyncio]==2.0.36",
+    "greenlet==3.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "hypothesis==6.122.3",
+    "httpx==0.28.1",
+    "ruff==0.8.4",
+    "import-linter==2.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"
+markers = [
+    "integration: needs postgres and redis running",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+# The seam that matters. meter.domain is pure: no I/O, no infrastructure, no siblings.
+# This is what makes the pricing math property-testable and "explain this charge" a pure
+# re-derivation rather than archaeology across three systems.
+[tool.importlinter]
+root_package = "meter"
+# Required so the "no I/O" contract can name third-party packages.
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "domain is pure - imports no sibling layer"
+type = "forbidden"
+source_modules = ["meter.domain"]
+forbidden_modules = ["meter.api", "meter.storage", "meter.pipeline", "meter.ops"]
+
+[[tool.importlinter.contracts]]
+name = "domain performs no I/O"
+type = "forbidden"
+source_modules = ["meter.domain"]
+forbidden_modules = ["asyncpg", "redis", "sqlalchemy", "httpx", "fastapi"]
+
+[[tool.importlinter.contracts]]
+name = "layers - api and pipeline sit above storage above domain"
+type = "layers"
+layers = [
+    "meter.api | meter.pipeline",
+    "meter.storage",
+    "meter.domain",
+]
+exhaustive = false
