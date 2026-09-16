@@ -286,6 +286,43 @@ def test_raising_the_limit_starts_serving_again(base_url, redis_client):
     assert httpx.get(f"{base_url}/v1/echo", headers=headers, timeout=10).status_code == 200
 
 
+def test_an_over_limit_customer_can_still_read_their_own_usage(base_url, redis_client):
+    """A spending limit caps what a customer SPENDS, and the account endpoints cannot move
+    that number -- they are exempt from billing for exactly that reason. Refusing them would
+    enforce a cap against requests that can never reach it, and would blind the customer to
+    the limit that just stopped them at the one moment they need to see it.
+
+    `/v1/usage` reports `spending_limit.serving`, which is False only in this state: if the
+    limit gate refused this path, that field could never be observed as False at all.
+    """
+    created = httpx.post(
+        f"{base_url}/admin/customers",
+        json={"name": f"over-limit-visibility-{time.time()}", "plan": "Starter"},
+        timeout=15,
+    ).json()
+    headers = {"X-API-Key": created["api_key"]}
+    customer_id = created["customer_id"]
+
+    redis_client.set(usage_repo.threshold_key(customer_id, _period()), 1)
+
+    assert httpx.get(f"{base_url}/v1/echo", headers=headers, timeout=10).status_code == 200
+    assert httpx.get(f"{base_url}/v1/echo", headers=headers, timeout=10).status_code == 402
+
+    usage = httpx.get(f"{base_url}/v1/usage", headers=headers, timeout=15)
+    assert usage.status_code == 200, "a refused customer must still be able to ask why"
+    limit = usage.json()["spending_limit"]
+    assert limit["request_threshold"] == 1
+    assert limit["requests_remaining"] == 0
+    assert limit["serving"] is False, (
+        "the endpoint that explains the refusal must be reachable while refused"
+    )
+
+    assert httpx.get(f"{base_url}/v1/invoices", headers=headers, timeout=15).status_code == 200
+
+    # The carve-out is not a hole: neither account call moved the number being capped.
+    assert usage_of(customer_id)["billable_requests"] == 1
+
+
 def test_overshoot_at_the_moment_of_crossing_is_bounded_by_concurrency(base_url, redis_client):
     """ADR-0008's irreducible overshoot: requests already in flight when the counter crosses
     still complete. The bound is concurrency, not spend rate -- which is the whole reason

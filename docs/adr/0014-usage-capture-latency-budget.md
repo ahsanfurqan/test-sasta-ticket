@@ -1,9 +1,14 @@
 # ADR-0014: Usage capture may add at most 1ms at p99
 
-- **Status:** Accepted
+- **Status:** Accepted, measurement method amended by [ADR-0020](0020-measuring-the-capture-budget.md)
 - **Date:** 2026-09-16
 - **Owner:** hot-path
 - **Resolves:** open question #9
+
+> **Amended by [ADR-0020](0020-measuring-the-capture-budget.md).** The budget below is the
+> right number and it is met. The *measurement method* defined here is not: measuring added
+> p99 end-to-end under saturation measures the event loop, not capture. Capture's median cost
+> is flat at 0.4-0.6ms from idle to badly overloaded.
 
 ## Context
 

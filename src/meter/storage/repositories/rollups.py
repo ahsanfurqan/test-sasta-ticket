@@ -135,7 +135,7 @@ async def insert_usage_events(conn: AsyncConnection, rows: list[dict]) -> int:
 _AGGREGATE_SQL = """
 INSERT INTO usage_rollups (
     customer_id, billing_period_id, usage_date, price_list_version_id,
-    plan_assignment_id, api_key_id, billable_requests, non_billable_requests
+    plan_assignment_id, api_key_id, billable_requests
 )
 SELECT e.customer_id,
        bp.id,
@@ -143,8 +143,7 @@ SELECT e.customer_id,
        pa.price_list_version_id,
        pa.id,
        e.api_key_id,
-       count(*) FILTER (WHERE e.billable),
-       count(*) FILTER (WHERE NOT e.billable)
+       count(*) FILTER (WHERE e.billable)
   FROM usage_events e
   -- The exclusion constraint on plan_assignments guarantees at most one match, so this
   -- join cannot fan out. A row with NO match is a request from a customer who was on no
@@ -167,8 +166,7 @@ SELECT e.customer_id,
  WHERE {predicate}
  GROUP BY 1, 2, 3, 4, 5, 6
 ON CONFLICT (customer_id, usage_date, plan_assignment_id, price_list_version_id, api_key_id)
-DO UPDATE SET billable_requests     = EXCLUDED.billable_requests,
-              non_billable_requests = EXCLUDED.non_billable_requests
+DO UPDATE SET billable_requests = EXCLUDED.billable_requests
 """
 
 

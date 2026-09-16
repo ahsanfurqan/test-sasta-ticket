@@ -40,28 +40,32 @@ is not settable. A customer in London gets a month boundary at 20:00 their time.
 
 ## Built but wrong, or unverified
 
-### The latency budget is missed, by roughly 2×
+### The latency budget: resolved, but the measurement is easy to take badly
 
-[ADR-0014](adr/0014-usage-capture-latency-budget.md) sets ≤1ms added at p99. Measured:
+**Previously listed here as "missed by roughly 2×". It is not.**
+[ADR-0020](adr/0020-measuring-the-capture-budget.md) measured capture cost across concurrency
+on one worker:
 
-| | p50 | p99 |
-|---|---|---|
-| server-side capture, sequential | 353µs | 607µs |
-| added end-to-end, concurrency 1 | +0.96ms | +2.15ms |
-| capture header under load, concurrency 50 | 0.584ms | **10.542ms** |
+| concurrency | throughput | capture p50 | capture p99 |
+|---|---|---|---|
+| 1 | 282 req/s | 0.400 ms | 0.981 ms |
+| 4 | **465 req/s** | 0.614 ms | 2.297 ms |
+| 16 | 250 req/s | 0.435 ms | 3.345 ms |
+| 50 | 103 req/s | 0.573 ms | 6.126 ms |
 
-The p99 under load is event-loop queueing in a saturated single-worker container on a shared
-Docker VM CPU, not Redis — raw Redis from the container is 174–415µs. But the structural cost
-is real: **three Redis round trips per served request**.
+Capture's **median is flat** from idle to badly saturated, and throughput peaks at concurrency
+4 then collapses. The rising p99 is the coroutine being suspended between the timestamps that
+bracket it — event-loop queueing, not capture work. ADR-0014's method (added p99 end-to-end
+under load) measured the event loop.
 
-Two honest ways down, neither taken:
+**What remains a gap:** a served request still makes **three Redis round trips**, and we chose
+not to collapse them. The Lua merge would save ~0.2ms of a 0.5ms operation, break Redis Cluster
+compatibility (no shared hash tag), and force rewriting the fake-Redis harness that proves
+capture-before-ack and no-Postgres-on-the-hot-path. Deferred deliberately — but if production
+shows capture dominating, that is the lever.
 
-1. Collapse the first two round trips into one Lua script (3 → 2, roughly 0.35ms). **Breaks
-   under Redis Cluster**, because those keys share no hash tag.
-2. Revise the ADR with production numbers rather than laptop ones.
-
-Note ADR-0014 predicted the laptop would flatter us and production would be hard. It got that
-backwards, which is itself worth knowing before trusting the number either way.
+**Also:** `x-usage-capture-us` is the measurement instrument and currently ships on every
+customer response. It should go behind a flag before this is public.
 
 ### A Redis process crash can still lose about a second of usage
 
@@ -92,20 +96,6 @@ During a Postgres outage the usage stream grows to its bound, then the API fails
 becomes a total outage — correct at the bound's edge, but **neither component's dashboard
 shows the coupling**. The bound itself is a configuration guess with no production data
 behind it.
-
-### `usage_rollups.non_billable_requests` is always zero
-
-The hot path streams only billable events; non-billable outcomes go to a separate Redis hash
-and never reach the rollups. Not wrong, but it is a column that always reads 0 and will
-mislead the next person who queries it. Needs either wiring up or removing.
-
-### ADR-0010's roll-forward prose describes something the schema forbids
-
-The implementation is correct — late usage is computed as `rollup total now − sum(quantity)
-over issued invoice lines`, because the rollup grain is unique and a second row cannot be
-added. But [ADR-0010](adr/0010-month-close-reconcile-then-issue.md) describes it as "an
-unbilled rollup the next invoice run picks up", which is not implementable as written. The
-code is right and the ADR is not.
 
 ---
 

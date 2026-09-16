@@ -1,6 +1,6 @@
 # ADR-0010: Reconcile before issuing; late usage rolls forward, never backward
 
-- **Status:** Accepted
+- **Status:** Accepted; roll-forward mechanism corrected below after implementation
 - **Date:** 2026-09-16
 - **Owner:** pipeline
 - **Resolves:** open question #4b
@@ -31,7 +31,19 @@ and this is the precise point where they meet.
    issued anyway **and the shortfall is recorded as a known discrepancy**, loudly, rather
    than silently.
 
-**Usage that arrives after close rolls forward.** It appears on the next month's invoice as
+**Usage that arrives after close rolls forward.**
+
+> **Correction, found while implementing this.** An earlier description of the mechanism —
+> late usage as "an unbilled rollup the next invoice run picks up" — is not implementable
+> against the schema. The rollup grain is unique per
+> `(customer, date, assignment, price list version, api key)`, so late usage for an
+> already-invoiced cell must **update the existing row**, not create a second one.
+>
+> What is actually implemented: roll-forward is computed as
+> `rollup total now − sum(quantity) over the issued invoice lines for that period and
+> segment`. Invoice lines are immutable, so that baseline cannot drift, and
+> `usage_rollups.invoice_id` means "this cell first reached a bill here" rather than "this
+> cell is fully billed". No schema change was needed; the prose was wrong, not the design. It appears on the next month's invoice as
 a clearly labelled prior-period line — *"12,400 requests from November, received after that
 invoice was issued"* — priced at the price list version in effect when it was *incurred*, not
 the current one. An issued invoice is never touched.

@@ -553,9 +553,9 @@ class UsageRollup(Base):
         nullable=False,
     )
     billable_requests: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    non_billable_requests: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default="0"
-    )
+    # There is deliberately no non_billable_requests column (migration 0003). The hot path
+    # does not stream non-billable outcomes -- they are counted in a Redis hash -- so such a
+    # column could only ever read 0, and a column that always reads 0 misleads.
     invoice_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False),
         ForeignKey("invoices.id", ondelete="RESTRICT", name="fk_usage_rollups_invoice"),
@@ -566,7 +566,7 @@ class UsageRollup(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "billable_requests >= 0 AND non_billable_requests >= 0",
+            "billable_requests >= 0",
             name="ck_usage_rollups_counts_non_negative",
         ),
         # QUERY: the aggregation upsert. "INSERT ... ON CONFLICT (customer_id, usage_date,

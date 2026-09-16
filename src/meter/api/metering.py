@@ -298,7 +298,16 @@ class UsageMeteringMiddleware:
                 await self._unavailable(send, "redis_unreachable")
                 return
 
-            if threshold_raw is not None and int(counter_raw or 0) >= int(threshold_raw):
+            # A spending limit caps what a customer SPENDS. The UNBILLED_PATHS cannot
+            # move that number -- they are excluded from billing for exactly that reason
+            # -- so refusing them enforces a cap against a request that can never reach
+            # it, and blinds the customer to the limit that just stopped them at the one
+            # moment they need to see it. Echo is refused; "what do I owe?" is not.
+            if (
+                threshold_raw is not None
+                and _is_billable_path(scope["path"])
+                and int(counter_raw or 0) >= int(threshold_raw)
+            ):
                 await self._count_nonbillable(period.label, caller.customer_id, LIMIT_REFUSED)
                 await _respond(
                     send,

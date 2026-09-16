@@ -160,7 +160,7 @@ any of these without a superseding ADR.**
 | Month close | **Reconcile, then issue**, with a bounded grace window as fallback and any shortfall recorded loudly. Late usage **rolls forward** as a labelled prior-period line at its original price version. | 0010 |
 | Redis down | **Fail closed** — `503`, no Postgres fallback. Makes the overshoot bound unconditional; costs full availability. | 0011 |
 | Corrections | **Credit notes**, never edits. Immutability enforced in the schema now; the mechanism is **not built in v1** and is a stated gap. | 0013 |
-| Latency budget | Capture adds **≤1ms at p99**, measured with capture toggled off and on. | 0014 |
+| Latency budget | Capture adds **≤1ms at p99**, and it is met: capture's median is **flat at 0.4-0.6ms** from idle to saturated. Measure server-side (`x-usage-capture-us`) at or below the throughput knee, and always report the concurrency -- a p99 measured inside a saturated event loop measures the event loop. | 0014, 0020 |
 | API keys | **Multiple** per customer, stored **hashed**, shown once. Revocation effective **within 30s** -- except during a Postgres outage, when it stretches to the stale ceiling (0019). | 0015, 0019 |
 | Partial periods | A mid-month signup or cancellation prorates exactly like a plan change. | 0017 |
 | Capture ordering | Usage is written to Redis **after the handler, before the response is sent**. A process that dies before capture also died before the customer got an answer, so their retry *is* the request. **No in-process batching** -- it would reopen the window this closes. | 0018 |
