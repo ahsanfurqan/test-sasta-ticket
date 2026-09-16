@@ -4,7 +4,7 @@ A paid API where customers pay for what they use. The endpoint is deliberately t
 every hard problem here is about counting correctly, charging correctly, and being able to
 explain every rupee.
 
-Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/) — 20 of them, each with what it
+Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/) — 21 of them, each with what it
 costs and where it breaks. This document is the map; the ADRs are the reasoning, including
 the alternatives that lost. Two ADRs were overturned by building the thing they described,
 and both are still in the repo with their corrections attached.
@@ -45,9 +45,18 @@ Every structural decision below is a ruling on which of those gives. The short v
 
 ## 2. The pieces, and where the boundaries are
 
-Four deployables — `api`, `worker`, Postgres 16, Redis 7 — from one image, because a
-reconciliation job that disagrees with the API about what a charge means is a class of bug
-we simply do not have this way.
+Four deployables — `api`, `worker`, Postgres 16, Redis 7 — with the API and worker built
+from one image, because a reconciliation job that disagrees with the API about what a charge
+means is a class of bug we simply do not have this way.
+
+**Why these components** is [ADR-0021](docs/adr/0021-postgres-and-redis-streams.md), which
+weighs Kafka for the buffer, ClickHouse or Timescale for usage, a managed queue, and
+Postgres alone with no Redis at all. The short version: the write path wants a log and the
+read path wants a relational database, and an invoice that must be exact, immutable and
+explainable puts the transaction boundary in Postgres. Redis is required anyway for the
+integer comparison that makes spending limits affordable, so it buffers too rather than
+adding a third datastore. [ADR-0002](docs/adr/0002-fastapi-over-django.md) covers FastAPI
+over Django and [ADR-0003](docs/adr/0003-sqlalchemy-orm-with-alembic.md) the ORM.
 
 ```
 src/meter/
@@ -341,42 +350,75 @@ line means.
 
 ---
 
-## 9. Where this design struggles as traffic grows
+## 9. What it does here, what it would do in production, and where it breaks
 
-Roughly in the order we would hit them.
+### Measured on this machine
 
-**~1,000 req/s, single API container — the latency budget, already missed.** Capture costs
-p50 353µs and p99 607µs server-side against ADR-0014's 1ms p99 ceiling; under load at
-concurrency 50 the harness measures p99 10.5ms. That p99 is event-loop queueing in a saturated
-single-worker container, not Redis — raw Redis from the container is 174–415µs. The real
-structural cost is **three Redis round trips per served request**: auth+marker+depth, then
-counter+threshold, then capture. Collapsing the first two into one Lua script gets to two
-round trips, at the cost of Redis Cluster compatibility, since those keys share no hash tag.
+One API container, one worker, one Postgres, one Redis, all on a shared Docker VM CPU on a
+laptop. These are real numbers from this repo, not estimates:
 
-**~5,000 rows/s — the drain, single consumer.** Four consumers in one group split work evenly
-and stay exact, so scaling is by adding worker containers. The insert itself does 17,900
-rows/s using one `unnest()` array per column; the rest is Redis round trips and parsing.
+| | Measured | How |
+|---|---|---|
+| Throughput, one API worker | **465 req/s** at its peak | `make load-test` at concurrency 4 |
+| Capture cost added per request | **p50 0.4–0.6ms**, flat from idle to saturated | `x-usage-capture-us` |
+| Drain, single consumer | **~5,000 rows/s** end to end | 150,000-event crash run |
+| Bulk insert alone | **17,900 rows/s** | one `unnest()` array per column |
+| Counter rebuild after losing Redis | **312ms** for 5,502 customers / 1.1M requests | `cli rebuild-counters` |
+| Reconciliation after 2,000 requests | **converged in 2.1s** | `make load-test` |
 
-**Redis memory, before Postgres write throughput.** One `XADD` per request with no batching
-means Redis capacity scales with request rate rather than batch count. During a Postgres
-outage the stream grows to its bound and then the API fails closed — so **Postgres
-availability and Redis memory are coupled in a way neither component's dashboard shows.**
+**The throughput number is the one to be careful with.** It peaks at concurrency 4 and then
+*collapses* — 465 req/s down to 103 at concurrency 50 — because a single uvicorn worker on a
+shared core saturates. That is a property of this laptop, not of the design, and it is why
+capture's p99 looked 10× worse than its median until we measured the two separately
+(ADR-0020).
 
-**Hundreds of millions of rows a month — the usage table.** Partitioning makes expiry a
-partition drop, and three indexes keep write amplification low. The first thing expected to
-outgrow the ORM is bulk insert on this table; it already uses `unnest()` rather than the unit
-of work.
+### What that implies for production
+
+The brief's target is a few thousand requests per second. Nothing here was benchmarked at
+that rate, and this laptop cannot produce it. What we can say is which component each part of
+the load lands on, and what would have to change.
+
+| Concern | Reasoning | What production needs |
+|---|---|---|
+| **Serving** | Per-request work is one Redis pipeline for auth and limits, one for capture. It is I/O-bound and stateless, and the collapse above is CPU contention on one worker, not contention on shared state. | Horizontal: more uvicorn workers per container, more containers. Roughly linear until Redis becomes the shared bottleneck. |
+| **Capture** | Flat 0.4–0.6ms regardless of load, dominated by one Redis round trip (raw Redis here is 174–415µs). | Redis on the same network segment. If capture ever dominates, collapse three round trips to two (ADR-0020) — the reason we did *not* is that it buys ~0.2ms and costs Redis Cluster compatibility. |
+| **Drain** | ~5,000 rows/s per consumer; four consumers in one group split evenly and stayed exact. | One worker container per ~5,000 req/s of sustained traffic. Scaling is adding containers, not tuning. |
+| **Postgres writes** | The insert does 17,900 rows/s and is not the bottleneck; the drain's Redis round trips are. | Unchanged for a long time. The pressure is storage and partitions, not write throughput. |
+| **Redis memory** | One `XADD` per request, no batching, so buffer size scales with request *rate*. | The first ceiling to arrive — see below. |
+
+**The honest summary: serving and draining scale horizontally and we have measured the unit;
+Redis is the component we have not stress-tested and is the one carrying the most risk.**
+
+### Where it breaks, roughly in the order we would hit it
+
+**Redis memory, before Postgres write throughput.** One stream entry per request means the
+buffer grows with traffic rate. During a Postgres outage it grows to its bound and then the
+API fails closed — so **Postgres availability and Redis memory are coupled in a way neither
+component's dashboard shows**. When the bound is approached in *normal* operation rather than
+during an incident, Redis Streams has stopped being the right tool and Kafka has started
+(ADR-0021).
 
 **Redis as a single point of everything.** It is in the critical path for availability
-(fail-closed), for latency (capture is synchronous), and for enforcement. That is a large bet
-on one component, and the honest mitigation is HA and replication, neither of which exists
-here.
+(fail-closed, ADR-0011), for latency (capture is synchronous, ADR-0018) and for enforcement.
+No replication or HA exists in this deployment. Counter rebuild being sub-second (312ms)
+makes a restart survivable; it does nothing about Redis being unavailable in the first place.
 
-**Month close, at customer count.** Close is per customer and reconciliation gates the invoice
-run. At large customer counts the 1st of the month becomes a scheduling problem rather than a
-job.
+**Redis Cluster does not fit the current keys.** Auth entries, counters and thresholds share
+no hash tag, so sharding requires re-keying first. That forecloses the Lua optimisation too.
 
----
+**Hundreds of millions of rows a month — the usage table.** Partitioning makes expiry a
+partition drop and three indexes keep write amplification low, so this is further out than it
+sounds. The first thing to outgrow the ORM is bulk insert on this table, which already uses
+`unnest()` rather than the unit of work.
+
+**Postgres is a single writer.** Read replicas help the live-usage endpoint and nothing else.
+Beyond one primary means sharding by customer — and the exclusion constraint on
+`plan_assignments`, plus invoice transactions spanning several tables, both assume one
+database.
+
+**Month close, at customer count.** Close is per customer and reconciliation gates the
+invoice run, so the 1st of the month becomes a scheduling problem rather than a job. Nothing
+here is parallelised across customers yet.
 
 ## 10. Evidence
 
