@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -72,6 +73,10 @@ class CreateCustomer(BaseModel):
 
 class IssueKey(BaseModel):
     label: str | None = None
+
+
+class ChangePlan(BaseModel):
+    plan: str
 
 
 class SetSpendingLimit(BaseModel):
@@ -138,6 +143,40 @@ async def revoke_key(key_id: str, context: HotPath) -> dict:
         "note": (
             "usage served by this key before revocation is still billed: the charge "
             "reflects what we served (ADR-0015)"
+        ),
+    }
+
+
+@router.post("/customers/{customer_id}/plan", dependencies=[Admin])
+async def change_plan(customer_id: str, body: ChangePlan, context: HotPath) -> dict:
+    """Move a customer to a different plan, effective now.
+
+    The brief's definition of done walks through exactly this: a Growth customer moved to
+    Scale partway through the month, then invoiced. ADR-0006 prorates the fee, the included
+    allowance and the band widths for each segment, and gives the change day to the new plan.
+    """
+    if body.plan not in provisioning.PLANS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown plan {body.plan!r}; one of {sorted(provisioning.PLANS)}",
+        )
+
+    at = datetime.now(UTC)
+    version_id = await provisioning.ensure_price_list_version(
+        context.sessions, provisioning.PLANS[body.plan]
+    )
+    closed, opened = await provisioning.change_plan(
+        context.sessions, customer_id, version_id, at
+    )
+    return {
+        "customer_id": customer_id,
+        "plan": body.plan,
+        "effective_from": at.isoformat(),
+        "closed_assignment_id": closed,
+        "new_assignment_id": opened,
+        "note": (
+            "the period now has two segments; any spending-limit threshold is recomputed "
+            "across both by the pipeline, never guessed from one (ADR-0008)"
         ),
     }
 

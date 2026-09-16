@@ -148,7 +148,7 @@ any of these without a superseding ADR.**
 | Plan change | Fee **and** included allowance prorate by **whole days**. Change day belongs to the new plan. Each segment rated against its own allowance and ladder. | 0006 |
 | Rounding | **The customer wins the fraction:** fees round down, allowances round up. Applied once, at the proration boundary. | 0006 |
 | Billable request | We authenticated it **and** processed it: `2xx` and client `4xx`. Never `401`/`403`, never our `5xx`, never a limit refusal. Capture happens **after** the outcome is known. | 0007 |
-| Limit enforcement | Invert the rupee limit into a **request-count threshold**; the hot path compares two integers. Overshoot budget **~5s**. | 0008 |
+| Limit enforcement | Invert the rupee limit into a **request-count threshold**; the hot path compares two integers. Overshoot budget **~5s**. The inversion is authoritative only across **all** of a period's segments, so the admin endpoint computes it for a single-segment period and **defers to the pipeline** otherwise -- it never guesses. | 0008 |
 | Limit scope | Caps the **total bill including the monthly fee**. A limit below the plan fee is rejected when set. | 0012 |
 | Timezone | Store UTC; evaluate boundaries in **Asia/Karachi** (+05:00, no DST). | 0009 |
 | Month close | **Reconcile, then issue**, with a bounded grace window as fallback and any shortfall recorded loudly. Late usage **rolls forward** as a labelled prior-period line at its original price version. | 0010 |

@@ -217,6 +217,14 @@ _INSERT_ASSIGNMENT = text(
     RETURNING id::text AS id
     """
 )
+_CLOSE_ASSIGNMENT = text(
+    """
+    UPDATE plan_assignments
+       SET effective = tstzrange(lower(effective), :at, '[)')
+     WHERE customer_id = :customer_id AND upper_inf(effective)
+    RETURNING id::text AS id
+    """
+)
 _CURRENT_ASSIGNMENT = text(
     """
     SELECT id::text AS id,
@@ -244,11 +252,15 @@ _UPSERT_LIMIT = text(
         (customer_id, billing_period_id, limit_paisa, threshold_requests,
          threshold_computed_at, threshold_price_list_version_id)
     VALUES (:customer_id, :billing_period_id, :limit_paisa, :threshold_requests,
-            now(), :version_id)
+            CASE WHEN CAST(:threshold_requests AS bigint) IS NULL THEN NULL ELSE now() END,
+            :version_id)
     ON CONFLICT (customer_id, billing_period_id) DO UPDATE
        SET limit_paisa = EXCLUDED.limit_paisa,
            threshold_requests = EXCLUDED.threshold_requests,
-           threshold_computed_at = now(),
+           -- NULL when we deferred, so `thresholds._needs_recompute` reports "never
+           -- computed" and the sweep fills it in. Stamping now() here would mark an absent
+           -- threshold as freshly computed, and the sweep would skip it forever.
+           threshold_computed_at = EXCLUDED.threshold_computed_at,
            threshold_price_list_version_id = EXCLUDED.threshold_price_list_version_id,
            updated_at = now()
     RETURNING id::text AS id
@@ -271,6 +283,66 @@ async def assign_plan(
         ).scalar_one()
         await session.commit()
     return assignment_id
+
+
+async def change_plan(
+    session_factory: async_sessionmaker[AsyncSession],
+    customer_id: str,
+    version_id: str,
+    at: datetime,
+) -> tuple[str | None, str]:
+    """Move a customer onto a different price list version from `at`.
+
+    Closing the open assignment and opening the new one happen in ONE transaction, in that
+    order. Plan assignments carry an exclusion constraint over their time range (a customer
+    cannot be on two plans at once), so inserting first would be rejected by the database --
+    which is the constraint doing its job, and the reason this is not two calls.
+
+    The change takes effect from `at`, and ADR-0006 gives the change DAY to the new plan.
+    """
+    async with session_factory() as session:
+        closed = (
+            await session.execute(
+                _CLOSE_ASSIGNMENT, {"customer_id": customer_id, "at": at}
+            )
+        ).scalar_one_or_none()
+        opened = (
+            await session.execute(
+                _INSERT_ASSIGNMENT,
+                {"customer_id": customer_id, "version_id": version_id, "starts_at": at},
+            )
+        ).scalar_one()
+        await session.commit()
+    return closed, opened
+
+
+_ASSIGNMENTS_IN_PERIOD = text(
+    """
+    SELECT count(*) AS n
+    FROM plan_assignments
+    WHERE customer_id = :customer_id
+      AND effective && tstzrange(:period_start, :period_end, '[)')
+    """
+)
+
+
+async def assignments_in_period(
+    session_factory: async_sessionmaker[AsyncSession],
+    customer_id: str,
+    bounds: PeriodBounds,
+) -> int:
+    """How many plan assignments touch this period -- i.e. how many segments it has."""
+    async with session_factory() as session:
+        return (
+            await session.execute(
+                _ASSIGNMENTS_IN_PERIOD,
+                {
+                    "customer_id": customer_id,
+                    "period_start": bounds.start,
+                    "period_end": bounds.end,
+                },
+            )
+        ).scalar_one()
 
 
 async def current_assignment(
@@ -401,7 +473,19 @@ async def set_spending_limit(
             f"{price_list.label}); the bill can never come in under it (ADR-0012)"
         )
 
-    threshold = rating.max_quantity_within(limit_paisa, applicable)
+    # ADR-0008's inversion is authoritative only across ALL of a period's segments: the
+    # earlier segments' prorated fees and usage charges have already spent part of the
+    # limit. This endpoint sees one segment, so for a single-segment period it computes the
+    # identical answer to `pipeline.thresholds.compute` (there, other_fees and
+    # other_usage_charges are both zero and the expression reduces to exactly this call) --
+    # and for a multi-segment period it MUST NOT guess. Guessing here would be generous in
+    # the customer's favour and wrong in ours, and it would be a second, quieter
+    # implementation of the same money question. So it defers: the row is written with no
+    # threshold, and the sweep, which can see every segment, fills it in.
+    segment_count = await assignments_in_period(session_factory, customer_id, bounds)
+    defer_to_sweep = segment_count > 1
+    threshold = None if defer_to_sweep else rating.max_quantity_within(limit_paisa, applicable)
+
     period_id = await ensure_billing_period(session_factory, customer_id, bounds)
 
     # Redis first, Postgres second -- the same order `pipeline.thresholds.publish` uses, and
@@ -410,7 +494,13 @@ async def set_spending_limit(
     # live but not yet recorded, which the sweep will simply recompute. The reverse order
     # would leave a row claiming a fresh threshold that nothing is enforcing -- ADR-0008's
     # "silent enforcement failure", which is the failure this system likes least.
-    await redis.set(usage_repo.threshold_key(customer_id, period.label), threshold)
+    if threshold is None:
+        # Clear any stale threshold rather than leaving an old number enforcing. Until the
+        # sweep lands, this customer is unlimited -- which is the honest consequence of not
+        # guessing, and it is bounded by the sweep interval.
+        await redis.delete(usage_repo.threshold_key(customer_id, period.label))
+    else:
+        await redis.set(usage_repo.threshold_key(customer_id, period.label), threshold)
 
     async with session_factory() as session:
         limit_id = (
@@ -433,6 +523,13 @@ async def set_spending_limit(
         "billing_period": period.label,
         "limit_paisa": limit_paisa,
         "request_threshold": threshold,
+        "threshold_pending": defer_to_sweep,
+        "threshold_note": (
+            f"this period has {segment_count} plan segments, so the threshold is computed "
+            "by the pipeline across all of them rather than guessed from the current one"
+        )
+        if defer_to_sweep
+        else None,
         "prorated_fee_paisa": applicable.monthly_fee_paisa,
         "prorated_included_requests": applicable.included_quantity,
         "days_in_period": days,
