@@ -159,6 +159,7 @@ any of these without a superseding ADR.**
 
 | # | Decision | ADR |
 |---|---|---|
+| Stack | **Postgres** is the system of record for everything touching money; **Redis Streams** is the hot-path buffer and counter store, never truth. Two datastores, not three -- Redis is needed anyway for the integer limit compare. Kafka, ClickHouse, a managed queue and Postgres-only were all weighed. | 0021 |
 | Pricing shape | A **versioned price list** is the pricing primitive. Plans are lists many customers share; a negotiated deal is a list with one customer on it. No override mechanism — rating has exactly one kind of input. Versions are immutable once referenced. | 0005 |
 | Plan change | Fee **and** included allowance prorate by **whole days**. Change day belongs to the new plan. Each segment rated against its own allowance and ladder. | 0006 |
 | Rounding | **The customer wins the fraction:** fees round down, allowances round up. Applied once, at the proration boundary. | 0006 |
