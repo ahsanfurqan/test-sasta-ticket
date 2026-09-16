@@ -127,7 +127,7 @@ make migrate     # alembic upgrade head
 make test        # pytest inside the api container
 make lint        # ruff + import-linter (enforces the domain purity seam)
 make test-outage # prove ADR-0019 by actually stopping Postgres (runs on the host)
-make load-test   # local traffic harness against /v1/echo
+make load-test   # fire N requests, then PROVE N were billed (exits non-zero if not)
 make logs        # tail all services
 make psql        # psql shell into postgres
 make redis-cli   # redis-cli shell
