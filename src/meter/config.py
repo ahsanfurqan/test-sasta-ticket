@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     threshold_interval_seconds: float = 5.0
     threshold_max_age_seconds: int = 60
 
+    # The worker's operations API (meter.pipeline.ops_api). Separate from the customer
+    # API because api may not import pipeline -- see that module's docstring.
+    ops_port: int = 8001
+
     # ADR-0010: reconcile, then issue -- with a bounded grace window as the fallback.
     # A config value, not a constant, because the right number depends on observed drain
     # latency we do not have yet.

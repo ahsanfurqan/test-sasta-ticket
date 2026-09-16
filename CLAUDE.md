@@ -143,6 +143,14 @@ same objection that ruled out billing a request refused for hitting a spending l
 Admin/demo surface is under `/admin`: create a customer, issue/list/revoke keys, change
 plan, set **and remove** a spending limit, read enforcement state.
 
+**Pipeline operations are on the worker at `http://localhost:8001/ops`** -- close a
+customer or a month, drain, aggregate, recompute thresholds, rebuild counters, reconcile.
+It is a second port because `meter.api` may not import `meter.pipeline`, so the trigger
+lives with the owner of the orchestration. Every endpoint calls the same function the
+scheduled loop calls, so a demo exercises the production path. There is deliberately no
+"just issue the invoice" route: `close-customer` is drain -> aggregate -> reconcile ->
+issue, and it is the only path to an invoice (ADR-0010).
+
 ## Decisions already made
 
 All 11 open questions are resolved. Full reasoning, alternatives, costs and breaking points

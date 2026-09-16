@@ -27,8 +27,10 @@ import contextlib
 import logging
 import signal
 
+import uvicorn
+
 from meter.config import get_settings
-from meter.pipeline import aggregate, close, counters, drain, thresholds
+from meter.pipeline import aggregate, close, counters, drain, ops_api, thresholds
 from meter.storage import cache, db
 
 logger = logging.getLogger("meter.worker")
@@ -48,6 +50,26 @@ async def _every(seconds: float, stopping: asyncio.Event, name: str, work) -> No
             logger.exception("%s pass failed; retrying on the next tick", name)
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stopping.wait(), timeout=seconds)
+
+
+async def _serve_ops(settings, engine, redis, drainer, stopping: asyncio.Event) -> None:
+    """Run the ops API until the worker is asked to stop.
+
+    Deliberately not fatal: if the port is taken, the pipeline keeps draining and invoicing.
+    Losing a manual trigger is an inconvenience; losing the drain is revenue.
+    """
+    config = uvicorn.Config(
+        ops_api.create_ops_app(settings, engine, redis, drainer),
+        host="0.0.0.0",
+        port=settings.ops_port,
+        log_level=settings.log_level.lower(),
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    serving = asyncio.create_task(server.serve())
+    await stopping.wait()
+    server.should_exit = True
+    await serving
 
 
 async def main() -> None:
@@ -115,6 +137,12 @@ async def main() -> None:
         ),
         asyncio.create_task(
             _every(HEARTBEAT_SECONDS, stopping, "close", close_pass), name="close"
+        ),
+        # An HTTP trigger for every stage above. A walkthrough must not require shelling
+        # into a container, and neither must an incident. It calls the SAME functions these
+        # loops call -- see meter.pipeline.ops_api for why it lives here and not on the API.
+        asyncio.create_task(
+            _serve_ops(settings, engine, redis, drainer, stopping), name="ops-api"
         ),
     ]
 

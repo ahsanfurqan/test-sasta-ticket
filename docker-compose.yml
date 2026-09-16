@@ -63,6 +63,10 @@ services:
   worker:
     build: .
     env_file: .env
+    ports:
+      # The pipeline operations API (meter.pipeline.ops_api). A second port because
+      # meter.api may not import meter.pipeline -- the trigger lives with the owner.
+      - "8001:8001"
     depends_on:
       postgres:
         condition: service_healthy
