@@ -156,6 +156,8 @@ any of these without a superseding ADR.**
 | Latency budget | Capture adds **≤1ms at p99**, measured with capture toggled off and on. | 0014 |
 | API keys | **Multiple** per customer, stored **hashed**, shown once. Revocation effective **within 30s**. | 0015 |
 | Partial periods | A mid-month signup or cancellation prorates exactly like a plan change. | 0017 |
+| Capture ordering | Usage is written to Redis **after the handler, before the response is sent**. A process that dies before capture also died before the customer got an answer, so their retry *is* the request. **No in-process batching** -- it would reopen the window this closes. | 0018 |
+| Postgres down | Keep serving (Redis can still count and enforce); the stream buffers to a **bounded** size, then fails closed. Thresholds go stale meanwhile -- alert on threshold age, not just on Postgres health. | 0018 |
 | Retention | Per-request rows **90 days**; rollups long-term, written at aggregation time. Usage table partitioned so expiry is a partition drop. | 0016 |
 
 ### Consequences worth holding in mind
@@ -173,6 +175,9 @@ and are deliberate, not oversights:
 - **A Redis restart that returns healthy-but-empty must not serve a single request against a
   zero counter** (0011). Counters are rebuilt from Postgres and marked authoritative before
   traffic is accepted. Rebuild time under load is unmeasured and is the main risk to 0011.
+- **"No request goes unbilled" is a claim about application crashes, not Redis crashes**
+  (0018). Redis AOF fsyncs once a second, so a Redis process crash can still lose up to a
+  second of captured usage. Never state the guarantee without that qualifier.
 
 ## Decisions are recorded in `docs/adr/`
 
