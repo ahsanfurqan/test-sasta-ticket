@@ -4,14 +4,29 @@ A paid API where customers pay for what they use. The endpoint is deliberately t
 every hard problem here is about counting correctly, charging correctly, and being able to
 explain every rupee.
 
-Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/) — 19 of them, each with what it
+Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/) — 20 of them, each with what it
 costs and where it breaks. This document is the map; the ADRs are the reasoning, including
 the alternatives that lost. Two ADRs were overturned by building the thing they described,
 and both are still in the repo with their corrections attached.
 
-**Status:** all five capabilities work end to end. 232 tests, 4 enforced architecture
+**Status:** all five capabilities work end to end. 265 tests, 4 enforced architecture
 contracts. Known gaps are in [`docs/known-gaps.md`](docs/known-gaps.md) and are not hidden
 in here.
+
+### Visual companions
+
+Three pages covering the same ground as this document, for anyone who would rather see the
+schema and the request path drawn than read them. **They are supplementary — this file and
+the ADRs are the deliverable, and neither depends on them.**
+
+| Page | What it covers |
+|---|---|
+| [Build record](https://claude.ai/code/artifact/12bf67b1-c4cf-495f-affa-71bbb2501c16?sk=Yztt60jiLWDL7y33IOeMEA) | The five capabilities, every decision with what it cost, the brief's worked example rendered as an invoice, and the evidence behind each claim |
+| [Schema map](https://claude.ai/artifact/QT8HXG5rR8D6QEfU3yhVMA?sk=9JrRRznPTasEJTXcBy3ERA) | All 12 tables with their columns and foreign keys, the invariants Postgres enforces on its own, and the path a rupee travels from request to invoice line |
+| [Codebase walkthrough](https://claude.ai/artifact/DtLmK9AAEDYyvhVV1RHkBH?sk=BAQDqgJhkoBTPFWDfQB4kA) | A guided tour of the code, for reading alongside the repository |
+
+Offline copies can be exported into [`docs/visual/`](docs/visual/) — see that directory's
+README. Nothing here is load-bearing either way.
 
 ---
 
@@ -395,7 +410,190 @@ rollups were both right.
 
 ---
 
-## 11. Known gaps
+---
+
+## 11. Running it yourself
+
+Everything below is a real call against the running system. There are no fixtures and no
+seeded data — each step does the thing it claims to do.
+
+Start it once:
+
+```bash
+make up
+```
+
+That builds the images, starts Postgres, Redis, the API and the worker, waits for them to
+report healthy, and applies the database migrations. The customer API is on
+**`localhost:8000`**; the pipeline's operations API is on **`localhost:8001`**.
+
+Two ports, for a reason worth knowing before you wonder: the customer-facing code is not
+allowed to import the background-processing code, and a build check enforces that. Closing a
+month is background work, so its trigger lives with the worker rather than on the customer
+API.
+
+### Flow 1 — create a customer and give them a key
+
+```bash
+curl -X POST localhost:8000/admin/customers \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Acme Travel", "plan": "Growth"}'
+```
+
+You get back a customer id, an API key id, and the key itself. **The key is shown once.** It
+is stored only as a SHA-256 digest, so nobody — including us — can read it back. Keep it for
+the rest of the walkthrough.
+
+A customer may hold several live keys at once, which is how a key is rotated without any
+downtime: issue a new one, move traffic across, then revoke the old one. Issuing a new key
+does **not** retire the old one; revoking is a separate, deliberate step.
+
+### Flow 2 — send traffic and watch the usage figure move
+
+```bash
+curl -H "X-API-Key: <KEY>" localhost:8000/v1/echo          # repeat as much as you like
+curl -H "X-API-Key: <KEY>" localhost:8000/v1/usage
+```
+
+`/v1/usage` shows how many requests this month, what they will cost, and the breakdown per
+plan period. The figure is deliberately allowed to be a moment behind — it is read from a
+fast counter rather than from the durable record, and the response says so. The invoice is
+read from the durable record and is exact.
+
+For a large amount of traffic in one command, and a check that every request was billed
+exactly once:
+
+```bash
+make load-test N=5000 CONCURRENCY=50
+```
+
+This is not a benchmark. It fires the requests, waits for them to reach the database, and
+then proves the count matches in three independent places — the counter, the per-request
+rows, and the aggregated totals. It exits with an error if any of them disagree.
+
+### Flow 3 — set a spending limit, cross it, watch requests get refused
+
+```bash
+curl -X PUT localhost:8000/admin/customers/<CUSTOMER_ID>/spending-limit \
+  -H 'Content-Type: application/json' \
+  -d '{"limit_paisa": 5000}'          # Rs. 50.00 — amounts are always in paisa
+```
+
+The response tells you the exact request count at which they will be refused. That number is
+worked out in advance and stored, so deciding whether to serve a request never involves
+calculating a bill — it compares two integers.
+
+Send traffic past that count and requests come back **402**. `/v1/usage` still works while
+they are refused, which is deliberate: a customer who has been cut off needs to be able to
+find out why.
+
+A Growth customer includes a very large number of requests in the monthly fee, so crossing a
+limit takes a while. **Use Starter for this flow** if you want it to happen quickly.
+
+### Flow 4 — move the customer to a different plan mid-month
+
+```bash
+curl -X POST localhost:8000/admin/customers/<CUSTOMER_ID>/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"plan": "Scale"}'
+```
+
+The month is now split in two, and `/v1/usage` shows both periods. The monthly fee, the
+included allowance **and the price tiers** are all scaled to the number of days on each plan.
+
+**If the customer has a spending limit, this may come back 409** — refused, with both numbers
+named. That is intentional. Scale's fee for half a month is around Rs. 45,000, so a customer
+with a Rs. 50 limit would be cut off from their very next request, and refusing their traffic
+would not reduce the bill by a single paisa — the fee is owed for the days they were on the
+plan. The error names three ways forward, including proceeding anyway if you mean to. Raise
+or remove the limit first and the upgrade goes through.
+
+### Flow 5 — close the month and produce the invoice
+
+```bash
+docker compose exec worker python -m meter.pipeline.cli close-customer \
+  --customer <CUSTOMER_ID>
+```
+
+or, if you would rather stay in Postman:
+
+```
+POST localhost:8001/ops/close-customer
+{"customer_id": "<CUSTOMER_ID>"}
+```
+
+Both run the same thing: drain everything still buffered, aggregate it, **prove nothing is
+outstanding**, and only then issue the invoice. The output shows the reconciliation and the
+exact database queries behind each figure, so the invoice is never issued without showing
+what was checked.
+
+There is deliberately no "just issue the invoice" command. One existed briefly, was used on a
+customer whose requests were still being written, and produced an invoice Rs. 22,049.65 short
+— which the database then refused to let anyone correct, because an issued invoice cannot be
+changed. The missing money appeared on the following month's invoice instead, priced at the
+rates that applied when it was incurred.
+
+Running the close twice is safe. The second run returns the same invoice rather than issuing
+another.
+
+### Flow 6 — ask why a line says what it says
+
+```bash
+curl -H "X-API-Key: <KEY>" localhost:8000/v1/invoices
+curl -H "X-API-Key: <KEY>" localhost:8000/v1/invoices/<INVOICE_NUMBER>
+```
+
+Every line carries how many requests, the price each, the total, and **which version of the
+price list produced it**. The answer comes from the system rather than from a person, and
+because the price list version is recorded on the line, changing a price today cannot alter
+what a line issued last month means.
+
+The response also reports whether the lines add up to the total, which is a thing worth
+checking rather than assuming.
+
+### Flow 7 — try to change an issued invoice
+
+Connect to the database directly and attempt it:
+
+```bash
+make psql
+```
+```sql
+UPDATE invoices SET total_paisa = 1 WHERE invoice_number = '<INVOICE_NUMBER>';
+```
+
+It is refused, by the database itself rather than by application code. The same applies to
+deleting it, reverting it to a draft, editing one of its lines, adding a line to it, and
+changing a price that an issued invoice depends on.
+
+### If you want to see it break
+
+```bash
+make test           # the full suite
+make test-outage    # stops Postgres for real and shows what survives
+make lint           # includes the architecture rules, which are enforced not documented
+```
+
+`make test-outage` genuinely stops the database container. Existing customers keep being
+served from cached credentials, unknown keys are still refused, new customers cannot be
+created, and everything recovers when it comes back.
+
+### Useful extras
+
+```bash
+docker compose exec worker python -m meter.pipeline.cli status     # operational numbers
+docker compose exec worker python -m meter.pipeline.cli reconcile --customer <ID>
+curl -X DELETE localhost:8000/admin/keys/<KEY_ID>                  # revoke a key
+curl -X DELETE localhost:8000/admin/customers/<ID>/spending-limit  # remove a limit
+make logs                                                          # tail everything
+```
+
+Revoking a key takes effect within about 30 seconds rather than instantly. Authentication is
+cached so that serving a request never has to query the database, and that cache lifetime is
+the window. It is a stated limit, not an accident — and it is listed in
+[`docs/known-gaps.md`](docs/known-gaps.md) as something to fix before a real leak happens.
+
+## 12. Known gaps
 
 In [`docs/known-gaps.md`](docs/known-gaps.md), stated plainly rather than buried here. The
 short version: the latency budget is missed and unfixed, credit notes do not exist, a Redis
