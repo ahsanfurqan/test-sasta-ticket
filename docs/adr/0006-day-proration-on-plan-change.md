@@ -1,9 +1,15 @@
 # ADR-0006: Mid-month plan change prorates fee and included allowance by whole days
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by [ADR-0017](0017-prorate-band-widths-and-partial-periods.md)
 - **Date:** 2026-09-16
 - **Owner:** billing-domain
 - **Resolves:** open questions #1 and #6
+
+> **Amended by [ADR-0017](0017-prorate-band-widths-and-partial-periods.md).** Implementing
+> this ADR showed that band widths must prorate as well — over 99.99% of the plan-change
+> penalty described below as an unavoidable cost turned out to come from leaving band
+> widths at full-month size. ADR-0017 also covers partial periods and corrects the
+> rounding bound stated here. Read that one alongside this.
 
 ## Context
 

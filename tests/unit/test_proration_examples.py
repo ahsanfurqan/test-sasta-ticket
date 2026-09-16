@@ -166,34 +166,38 @@ class TestAFullMonthIsTheIdentity:
 
 
 class TestTheLadderRestartsAtEverySegmentBoundary:
-    """ADR-0006's named sharp edge, recorded as behaviour rather than reported as a bug.
+    """ADR-0006 named this as a sharp edge. ADR-0017 established that it barely bites once
+    band widths prorate, and pins what is left.
 
-    A customer who does 2,000,000 requests on Growth across a mid-month change pays MORE
-    than the same 2,000,000 requests would have cost with no change at all, because each
-    segment enters the expensive Rs. 0.50 band from the start. Prorating the allowances
-    softens it; it does not remove it.
+    ADR-0006 prorated the fee and the allowance and said nothing about band widths, so a
+    17-day Growth segment still made the customer buy a full 500,000 requests at Rs. 0.50
+    before reaching Rs. 0.35 -- inside 17/30 of a month. That cost a customer Rs. 74,999.65
+    for splitting 2,000,000 requests across a plan change, and it was read as the
+    unavoidable price of the ladder restarting. It was not: over 99.99% of it came from the
+    un-prorated bounds.
 
-    Derivation, 17 + 13 days of Growth in a 30-day month, 1,000,000 requests in each:
+    With band widths prorated (ADR-0017), 17 + 13 days of Growth in a 30-day month with
+    1,000,000 requests in each segment:
 
-      Segment A (17 days)  fee 850_000, allowance 283,334
-        chargeable 1,000,000 - 283,334 = 716,666
-        500,000 x 50 = 25_000_000  then  216,666 x 35 =  7_583_310
-        segment total                                  = 33_433_310
+      Segment A (17 days)  fee 850_000, allowance 283,334, first band 283,334 wide
+        chargeable 716,666 -> 283,334 x 50 = 14_166_700  then 433,332 x 35 = 15_166_620
+        segment total                                                      = 30_183_320
 
-      Segment B (13 days)  fee 650_000, allowance 216,667
-        chargeable 1,000,000 - 216,667 = 783,333
-        500,000 x 50 = 25_000_000  then  283,333 x 35 =  9_916_655
-        segment total                                  = 35_566_655
+      Segment B (13 days)  fee 650_000, allowance 216,667, first band 216,667 wide
+        chargeable 783,333 -> 216,667 x 50 = 10_833_350  then 566,666 x 35 = 19_833_310
+        segment total                                                      = 31_316_660
 
-      Period                                           = 68_999_965  (Rs. 689,999.65)
+      Period                                                               = 61_499_980
 
     Unsplit, Growth for the whole month, 2,000,000 requests:
-        1_500_000 + 500,000 x 50 + 1,000,000 x 35      = 61_500_000  (Rs. 615,000.00)
+        1_500_000 + 500,000 x 50 + 1,000,000 x 35                          = 61_500_000
 
-    The split costs Rs. 74,999.65 more. Support needs to know this exists.
+    The split is now 20 paisa CHEAPER, not Rs. 74,999.65 dearer, because each segment rounds
+    its bounds up independently. That residual is the honest remainder of the decision: a
+    plan change still does not leave the bill exactly unchanged -- only very nearly.
     """
 
-    def test_the_split_costs_more_than_the_same_usage_unsplit(self):
+    def test_splitting_no_longer_penalises_the_customer(self):
         split = rate_period(
             [
                 Segment(price_list=GROWTH_V1, days=17, days_in_month=30, quantity=1_000_000),
@@ -202,16 +206,40 @@ class TestTheLadderRestartsAtEverySegmentBoundary:
         )
         unsplit = rate(2_000_000, GROWTH_V1)
 
-        assert [segment.total_paisa for segment in split.segments] == [33_433_310, 35_566_655]
-        assert split.total_paisa == 68_999_965
+        assert [segment.total_paisa for segment in split.segments] == [30_183_320, 31_316_660]
+        assert split.total_paisa == 61_499_980
         assert unsplit.total_paisa == 61_500_000
 
-        assert split.total_paisa > unsplit.total_paisa
-        assert split.total_paisa - unsplit.total_paisa == 7_499_965  # Rs. 74,999.65
+        # Was +7_499_965 before ADR-0017. Now a 20 paisa discount, not a Rs. 75,000 penalty.
+        assert split.total_paisa - unsplit.total_paisa == -20
+
+    def test_the_residual_favours_the_customer_and_is_bounded_by_the_segment_count(self):
+        """ADR-0017's stated remainder: bounds round up per segment, so splitting can only
+        ever be cheaper, never dearer, and only by a sliver. Pinned rather than tolerated."""
+        for segments in ([17, 13], [10, 10, 10], [7, 7, 8, 8]):
+            period = rate_period(
+                [
+                    Segment(GROWTH_V1, days=d, days_in_month=30, quantity=1_000_000 // len(segments))
+                    for d in segments
+                ]
+            )
+            unsplit = rate(1_000_000 // len(segments) * len(segments), GROWTH_V1)
+            difference = period.total_paisa - unsplit.total_paisa
+            assert difference <= 0, f"{segments} penalised the customer by {difference}"
+
+    def test_a_17_day_growth_segment_has_a_proportionally_smaller_cheap_tier(self):
+        """The mechanism, stated directly: tiers scale with time, prices do not."""
+        seventeen_days = prorate(GROWTH_V1, 17, 30)
+
+        assert seventeen_days.included_quantity == 283_334          # ceil(500,000 x 17/30)
+        assert seventeen_days.bands[0].up_to == 283_334             # the Rs. 0.50 tier, scaled
+        assert seventeen_days.bands[0].unit_price_paisa == 50       # the price is untouched
+        assert seventeen_days.bands[1].up_to is None
+        assert seventeen_days.bands[1].unit_price_paisa == 35
 
     def test_the_fees_alone_did_not_cause_it(self):
-        """The extra is entirely the ladder restarting. The prorated fees still add up to
-        exactly one monthly fee, so nothing was double-charged."""
+        """Whatever the ladder does, the fees are not the cause: the prorated fees still add
+        up to exactly one monthly fee, so a plan change never double-charges the fee."""
         split = rate_period(
             [
                 Segment(price_list=GROWTH_V1, days=17, days_in_month=30, quantity=1_000_000),

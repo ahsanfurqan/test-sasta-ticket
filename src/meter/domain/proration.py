@@ -5,15 +5,22 @@ monthly fee and the included allowance are prorated by whole days:
 
     segment_fee       = plan_fee      x segment_days / days_in_month   (rounded DOWN)
     segment_allowance = plan_included x segment_days / days_in_month   (rounded UP)
+    segment_band_bound= band_bound    x segment_days / days_in_month   (rounded UP)
 
-Usage in a segment is rated against that segment's own prorated allowance and its own band
-ladder. The day of the change belongs to the NEW plan (ADR-0006). Days in the month are the
+Usage in a segment is rated against that segment's own prorated allowance and its own
+prorated band ladder. Band WIDTHS scale with time; band PRICES do not -- a price per
+request has no time dimension (ADR-0017). The day of the change belongs to the NEW plan (ADR-0006). Days in the month are the
 actual calendar days, 28-31, and they arrive as an integer input -- this module never sees a
 clock or a timezone (ADR-0009 resolves "the 18th" before it gets here).
 
-**Rounding, ADR-0006: the customer wins the fraction.** Fees round down, allowances round
-up. Applied once, here, at the proration boundary, and never again further down. Both
-directions are exact integer arithmetic; nothing in this module divides in floating point.
+**Rounding, ADR-0006: the customer wins the fraction.** Fees round down; allowances and
+band bounds round up. Applied once, here, at the proration boundary, and never again further
+down. All of it is exact integer arithmetic; nothing in this module divides in floating
+point.
+
+The bound is per-boundary, not per-month (ADR-0017 corrects ADR-0006's wording on this):
+across N segments the prorated fees fall short of the monthly fee by less than N paisa, and
+the allowances exceed the monthly allowance by fewer than N requests.
 
 Shape, and why
 --------------
@@ -87,13 +94,53 @@ def prorate_allowance(included_quantity: int, days: int, days_in_month: int) -> 
     return (included_quantity * days + days_in_month - 1) // days_in_month
 
 
+def prorate_band_bound(up_to: int | None, days: int, days_in_month: int) -> int | None:
+    """A band's cumulative upper bound for part of a month, rounded UP.
+
+    Same rule as the allowance, because it is the same kind of quantity -- the included
+    allowance is band zero priced at zero, and treating band zero one way and band one
+    another way inside the same calculation is arbitrary (ADR-0017).
+
+    An unbounded band stays unbounded: there is no fraction of infinity.
+    """
+    if up_to is None:
+        return None
+    return prorate_allowance(up_to, days, days_in_month)
+
+
+def _prorated_bands(bands: tuple, days: int, days_in_month: int) -> tuple:
+    """Scale every band bound, dropping any band left with no width in this segment.
+
+    Two bands can collapse onto the same bound once scaled (and in a zero-day segment every
+    bounded band collapses to zero), which would otherwise produce a ladder whose bounds no
+    longer strictly increase. A band with no width does not exist for this segment, so it is
+    dropped rather than kept as an empty rung.
+
+    Dropping a rung means its price is skipped and that usage falls to the next band. For a
+    catalogue whose prices fall with volume -- ours -- that reaches the cheaper price sooner,
+    which is the same direction as every other rounding decision here.
+    """
+    kept = []
+    previous = 0
+    for band in bands:
+        if band.up_to is None:
+            kept.append(replace(band, up_to=None))
+            continue
+        bound = prorate_band_bound(band.up_to, days, days_in_month)
+        if bound <= previous:
+            continue
+        kept.append(replace(band, up_to=bound))
+        previous = bound
+    return tuple(kept)
+
+
 def prorate(price_list: PriceList, days: int, days_in_month: int) -> PriceList:
     """`price_list` as it applies to a `days`-long segment of a `days_in_month`-day month.
 
-    Fee down, allowance up (ADR-0006). The BANDS are untouched: ADR-0006 prorates the fee
-    and the allowance and says nothing about band widths, and the ladder restarting per
-    segment is its named, accepted consequence. Name and version are untouched too, so the
-    charge still cites the version it came from and a full-month segment is the identity.
+    Fee down; allowance and band bounds up (ADR-0006 as amended by ADR-0017). Band PRICES
+    are untouched -- a price per request does not scale with time. Name and version are
+    untouched too, so the charge still cites the version it came from and a full-month
+    segment is the identity.
     """
     days, days_in_month = _require_days(days, days_in_month)
     return replace(
@@ -102,6 +149,7 @@ def prorate(price_list: PriceList, days: int, days_in_month: int) -> PriceList:
         included_quantity=prorate_allowance(
             price_list.included_quantity, days, days_in_month
         ),
+        bands=_prorated_bands(price_list.bands, days, days_in_month),
     )
 
 

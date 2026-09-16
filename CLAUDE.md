@@ -155,6 +155,7 @@ any of these without a superseding ADR.**
 | Corrections | **Credit notes**, never edits. Immutability enforced in the schema now; the mechanism is **not built in v1** and is a stated gap. | 0013 |
 | Latency budget | Capture adds **≤1ms at p99**, measured with capture toggled off and on. | 0014 |
 | API keys | **Multiple** per customer, stored **hashed**, shown once. Revocation effective **within 30s**. | 0015 |
+| Partial periods | A mid-month signup or cancellation prorates exactly like a plan change. | 0017 |
 | Retention | Per-request rows **90 days**; rollups long-term, written at aggregation time. Usage table partitioned so expiry is a partition drop. | 0016 |
 
 ### Consequences worth holding in mind
@@ -162,8 +163,10 @@ any of these without a superseding ADR.**
 Three of these have sharp edges that will surface in review. They are recorded in the ADRs
 and are deliberate, not oversights:
 
-- **The band ladder restarts at each plan-change segment** (0006). A customer whose usage
-  straddles an upgrade can pay more than the same usage would have cost on either plan alone.
+- **A plan change still does not leave the bill exactly unchanged** (0017). Band widths now
+  prorate, so the old Rs. 75,000 penalty is gone -- but each segment rounds its bounds up
+  independently, leaving splitting a sliver *cheaper* than not splitting. Bounded, and it
+  grows with segment count.
 - **A mid-month upgrade can shrink remaining limit headroom, or exhaust it instantly** (0012),
   because the larger prorated fee consumes more of the same cap — as a direct result of an
   action the customer took expecting more capacity.
