@@ -9,12 +9,19 @@ at it. It is *not* closed by an implementation quietly assuming an answer. If co
 decision that lives here, that is a signal to write the ADR, not to pick the convenient
 branch.
 
-**Status key:** 🔴 blocking work now · 🟡 needed before the feature lands · 🟢 needed before
-this goes live
+**Status key:** ✅ resolved, see the ADR · 🔴 blocking work now · 🟡 needed before the feature
+lands · 🟢 needed before this goes live
 
 ---
 
-## 1. 🔴 Mid-month plan change: what happens to the fee and the included allowance?
+## 1. ✅ RESOLVED — Mid-month plan change: what happens to the fee and the included allowance?
+
+> **Resolved by [ADR-0006](adr/0006-day-proration-on-plan-change.md): option B.** Fee and
+> included allowance are both prorated by whole days; the change day belongs to the new
+> plan; each segment is rated against its own allowance and ladder. Rounding goes in the
+> customer's favour. **Note the sharp edge recorded there:** the ladder restarts at each
+> segment boundary, so split usage can cost more than the same usage on either plan alone.
+> Not fully implementable until #4 (timezone) is settled.
 
 *The headline question.* Commercial explicitly handed this back: "your call, as long as we
 can explain it to the customer." A customer on Growth upgrades to Scale on the 18th.
@@ -39,7 +46,12 @@ is a schema requirement — so this question blocks `data-model` as much as `bil
 
 ---
 
-## 2. 🔴 What counts as a billable request?
+## 2. ✅ RESOLVED — What counts as a billable request?
+
+> **Resolved by [ADR-0007](adr/0007-billable-request-definition.md).** Billable = we
+> authenticated it and processed it: 2xx and client 4xx. Not billed: 401/403, our 5xx,
+> or requests refused for hitting the spending limit. Consequence: usage is captured
+> *after* the outcome is known, which is a hot-path constraint, not just a billing rule.
 
 Nobody has said, and it moves the invoice more than most of the rest of this list.
 
@@ -62,7 +74,14 @@ not just a billing rule — capture before the handler and you cannot know the s
 
 ---
 
-## 3. 🔴 Spending limit: exactly what is being limited, and how far can it overshoot?
+## 3. 🟡 PARTLY RESOLVED — Spending limit: exactly what is being limited, and how far can it overshoot?
+
+> **Overshoot resolved by [ADR-0008](adr/0008-spending-limit-precomputed-threshold.md):
+> ~5 seconds**, achieved by inverting the rupee limit into a request-count threshold so
+> the hot path compares two integers. **Still open:** whether the limit counts the monthly
+> fee or only usage charges, and what happens when a customer raises their limit
+> mid-month. Also note ADR-0008 couples this budget to the usage-buffering design and
+> makes #8 more urgent.
 
 Customers said being cut off "well after" passing the limit will generate complaints.
 "Well after" is not a specification. Three sub-questions:
@@ -126,7 +145,12 @@ go-live even if the answer is "not in v1".
 
 ---
 
-## 6. 🟡 Rounding on prorated amounts — who gets the leftover paisa?
+## 6. ✅ RESOLVED — Rounding on prorated amounts — who gets the leftover paisa?
+
+> **Resolved by [ADR-0006](adr/0006-day-proration-on-plan-change.md): the customer does.**
+> Fees round down, included allowances round up — *"where it doesn't divide evenly, we
+> round in your favour: down on what you pay, up on what you get."* Applied once, at the
+> proration boundary.
 
 Every per-request price is exact in paisa (80, 50, 35, 25, 15), so **rating needs no
 rounding at all**. Division enters only through proration, which means this question cannot
@@ -142,7 +166,13 @@ model is wrong.
 
 ---
 
-## 7. 🔴 Custom pricing: an override of a plan, or a price list of its own?
+## 7. ✅ RESOLVED — Custom pricing: an override of a plan, or a price list of its own?
+
+> **Resolved by [ADR-0005](adr/0005-versioned-price-lists.md): option B.** A versioned
+> price list is the pricing primitive; Starter/Growth/Scale are simply lists many
+> customers share, and a negotiated deal is a list with one customer on it. There is no
+> override mechanism. Price list versions are immutable once referenced. **This unblocks
+> the schema.**
 
 Commercial wants to give one negotiated customer a different fee, a different included
 amount, or different prices, without a deployment. **This blocks `data-model` from
