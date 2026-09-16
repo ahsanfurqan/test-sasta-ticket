@@ -189,8 +189,15 @@ This repository is built in sessions with hard scope boundaries. Current state:
 - **Session 1 (done):** context, agents, ADR process, running skeleton, one echo endpoint
   proving the stack talks to Postgres and Redis. All 11 open questions resolved across
   ADRs 0005-0016, so the schema and the pricing math are both unblocked.
-- **Not yet built, deliberately:** billing math, usage recording, the live usage endpoint,
-  spending limits, invoicing. No function in this repo calculates money yet.
+- **Session 2 (in progress):** the marginal band ladder in `meter.domain` -- rating,
+  charge decomposition, and the spending-limit inversion ADR-0008 depends on. Pure, no
+  storage, property-tested.
+- **Not yet built:** proration, usage recording, the live usage endpoint, limit
+  enforcement on the hot path, the schema, invoicing.
 
 `GET /v1/echo` touches Postgres and Redis **only to prove connectivity**. It is not a
 model for the hot path, and its dependency checks must not survive into a real endpoint.
+
+`meter.domain.catalogue` holds the launch price lists as **seed data for tests and
+database seeding** -- not as the runtime source of truth. Pricing lives in the database
+(ADR-0005). If the two ever disagree, the database is right.
