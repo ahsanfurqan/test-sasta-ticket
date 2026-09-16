@@ -1,6 +1,6 @@
 # ADR-0018: Capture before the response is sent, and what every failure costs
 
-- **Status:** Accepted
+- **Status:** Accepted, corrected by [ADR-0019](0019-auth-during-a-postgres-outage.md)
 - **Date:** 2026-09-16
 - **Owner:** hot-path, pipeline
 - **Refines:** [ADR-0007](0007-billable-request-definition.md), [ADR-0011](0011-fail-closed-when-redis-unavailable.md), [ADR-0014](0014-usage-capture-latency-budget.md)
@@ -62,6 +62,11 @@ pending, and it is redelivered on restart; the idempotency key makes redelivery 
 
 ### 4. Postgres unavailable: keep serving, bound the buffer
 
+> **Corrected by [ADR-0019](0019-auth-during-a-postgres-outage.md).** As written below, this
+> row was wrong: it was reasoned from the usage path and ignored authentication, which
+> resolves keys from a 30-second cache backed by Postgres. Without ADR-0019's stale-while-error
+> entries, "keep serving" lasts exactly as long as the auth cache does.
+
 Unlike Redis (ADR-0011), Postgres being down does not stop serving. Counting and limit
 enforcement both run off Redis, so the system can still do the two things it must not get
 wrong. The stream grows until Postgres returns, and the drain resumes.
@@ -72,6 +77,13 @@ outage. On reaching the bound the system fails closed, for the same reason ADR-0
 we would otherwise be serving traffic we cannot record. The bound is configuration, and the
 alert fires long before it.
 
+**`pipeline` trims the stream after acknowledging.** This ADR originally bounded the stream
+without saying who empties it, and `XACK` clears the pending list, not the stream — so in
+ordinary successful operation the stream grew to 943,573 entries against a 1,000,000 bound,
+and a valve designed for a Postgres outage was about to trip on nothing but success. Trimming
+is anchored on the oldest *pending* message id, so a crashed worker's batch is never removed
+before it can be redelivered.
+
 ### The failure matrix
 
 | Failure | What happens | Cost |
@@ -79,7 +91,7 @@ alert fires long before it.
 | Process dies between handler and capture | Customer never received a response; their retry is the request | **Nothing lost** |
 | Process dies between capture and sending the response | Usage captured, customer sees a connection error and retries | The retry is a second served request and is billed (correct: we did the work twice) |
 | Worker dies mid-drain | Batch never `XACK`ed, redelivered on restart, idempotency key dedupes | Nothing lost, nothing double-counted |
-| Postgres down | Redis keeps buffering, serving and limit enforcement continue, drain resumes | Thresholds go stale (see below); stream grows to its bound |
+| Postgres down | Redis keeps buffering, serving and limit enforcement continue, drain resumes. **Auth needs [ADR-0019](0019-auth-during-a-postgres-outage.md) for this row to be true at all** — without stale-while-error, cached keys expire in 30s and the API stops | Thresholds go stale (see below); stream grows to its bound; the revocation window stretches for the duration |
 | Postgres down past the stream bound | Fail closed | Full outage, deliberately, rather than serving unrecordable traffic |
 | Redis down | `503`, fail closed (ADR-0011) | Full outage; we can neither count nor enforce |
 | Redis restarts empty | Counters rebuilt from Postgres and marked authoritative before traffic is accepted (ADR-0011) | Outage for the rebuild duration |

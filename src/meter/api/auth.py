@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from dataclasses import dataclass
 
 from fastapi import HTTPException, Request, status
+from sqlalchemy.exc import SQLAlchemyError
 
 from meter.api.context import HotPathContext
 from meter.storage.repositories import keys as keys_repo
@@ -65,24 +67,58 @@ def api_key_from_headers(scope_headers: list[tuple[bytes, bytes]]) -> str | None
     return None
 
 
-def encode(record: keys_repo.KeyRecord) -> str:
-    """Cache encoding: `customer_id|key_id|key_hash`.
+class PostgresUnavailable(Exception):
+    """Postgres could not answer, and no stale entry was licensed to stand in for it."""
 
-    A three-field split beats JSON here by enough to matter on a path measured in
+
+def encode(record: keys_repo.KeyRecord, fresh_until: float) -> str:
+    """Cache encoding: `customer_id|key_id|key_hash|fresh_until`.
+
+    A four-field split beats JSON here by enough to matter on a path measured in
     microseconds, and what it holds is the digest Postgres holds -- never the key.
+
+    The entry carries TWO ages (ADR-0019). `fresh_until` is when it stops being trusted
+    outright; the Redis TTL is the later ceiling past which it is not served at all. Between
+    them the entry is refreshed on access, and served stale only if Postgres is unreachable.
     """
-    return f"{record.customer_id}|{record.key_id}|{record.key_hash}"
+    # FLOOR the deadline, never round it. Rounding to nearest can push a revocation window
+    # past the 30 seconds ADR-0015 promises, and a security parameter must only ever err
+    # short.
+    return f"{record.customer_id}|{record.key_id}|{record.key_hash}|{int(fresh_until)}"
 
 
 def decode(cached: str, digest: str) -> Caller | None:
-    """Decode a cached entry, confirming the digest in constant time."""
-    if cached == UNKNOWN:
+    """Decode a cached entry, confirming the digest in constant time.
+
+    Freshness is not consulted here: this answers *who* the entry names, and `resolve`
+    decides whether the entry is still allowed to speak.
+    """
+    if cached.startswith(UNKNOWN):
         return None
     customer_id, _, rest = cached.partition("|")
-    key_id, _, key_hash = rest.partition("|")
+    key_id, _, rest = rest.partition("|")
+    key_hash, _, _ = rest.partition("|")
     if not key_hash or not secrets.compare_digest(key_hash, digest):
         return None
     return Caller(customer_id=customer_id, api_key_id=key_id)
+
+
+def fresh_until(cached: str) -> float:
+    """When this entry stops being trusted outright.
+
+    A NEGATIVE entry is fresh for as long as it exists: it is written with the short TTL and
+    never served stale (ADR-0019), so its presence and its freshness are the same fact. Only
+    positive entries carry the longer stale ceiling and therefore need a deadline inside them.
+
+    An unreadable deadline is treated as already stale -- refreshing needlessly is a wasted
+    query; trusting a value we cannot parse is an auth decision made on a guess.
+    """
+    if cached.startswith(UNKNOWN):
+        return float("inf")
+    try:
+        return float(cached.rpartition("|")[2])
+    except ValueError:
+        return 0.0
 
 
 async def resolve(
@@ -99,21 +135,54 @@ async def resolve(
 
     Raises the underlying Redis error on a cache write failure: an API that cannot reach
     Redis fails closed (ADR-0011), and swallowing it here would serve the request instead.
-    """
-    if cached is not None:
-        return decode(cached, digest)
 
-    record = await keys_repo.lookup_by_hash(
-        context.sessions, digest, timeout_seconds=context.settings.db_timeout_seconds
-    )
+    Raises `PostgresUnavailable` when the directory cannot be reached and no stale entry is
+    licensed to stand in for it (ADR-0019).
+    """
+    now = time.time()
+
+    if cached is not None and now < fresh_until(cached):
+        return decode(cached, digest)  # fresh: the whole cost is the read already made
+
+    try:
+        record = await keys_repo.lookup_by_hash(
+            context.sessions, digest, timeout_seconds=context.settings.db_timeout_seconds
+        )
+    except (SQLAlchemyError, TimeoutError, OSError) as exc:
+        # ADR-0019: stale-while-error. Three restrictions, all deliberate.
+        #   * only a Postgres FAILURE licenses staleness -- a key Postgres positively reports
+        #     as revoked is revoked, outage or not. This branch is reached only on an error.
+        #   * negatives are never served stale: an outage must not turn "no such key" into
+        #     "maybe", so an UNKNOWN entry decodes to None and is refused below.
+        #   * past the Redis TTL there is no entry at all, which is the ceiling.
+        stale = decode(cached, digest) if cached is not None else None
+        if stale is not None:
+            logger.warning(
+                "DEGRADED: serving a stale auth entry, the key directory is unreachable (%s). "
+                "Revocation is not effective until it returns (ADR-0019).",
+                type(exc).__name__,
+            )
+            return stale
+        raise PostgresUnavailable(str(exc)) from exc
 
     live = record is not None and record.active and secrets.compare_digest(record.key_hash, digest)
-    value = encode(record) if live else UNKNOWN  # type: ignore[arg-type]
+    value = (
+        encode(record, now + context.hot.auth_cache_ttl_seconds)  # type: ignore[arg-type]
+        if live
+        else UNKNOWN
+    )
 
     await context.cache.set(
         keys_repo.auth_cache_key(digest),
         value,
-        ex=context.hot.auth_cache_ttl_seconds,
+        # The Redis TTL is the STALE CEILING, not the freshness window -- freshness is the
+        # timestamp inside the value. A negative entry gets only the short TTL, because it
+        # is never served stale and so has nothing to stay alive for.
+        ex=(
+            context.hot.auth_stale_ceiling_seconds
+            if live
+            else context.hot.auth_cache_ttl_seconds
+        ),
     )
     return decode(value, digest) if live else None
 

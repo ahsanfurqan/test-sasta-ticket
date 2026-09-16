@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 RUN     := $(COMPOSE) run --rm --no-deps
 
-.PHONY: help up down migrate test lint load-test logs ps psql redis-cli shell fmt clean
+.PHONY: help up down migrate test test-outage lint load-test logs ps psql redis-cli shell fmt clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -44,6 +44,9 @@ lint: ## ruff + import-linter (enforces the meter.domain purity seam)
 fmt: ## Format and autofix
 	$(COMPOSE) exec -T api ruff format src tests
 	$(COMPOSE) exec -T api ruff check --fix src tests
+
+test-outage: ## Prove ADR-0019 by actually stopping Postgres (runs on the host)
+	./tests/outage/postgres_outage.sh
 
 load-test: ## Local traffic harness against /v1/echo (N=, CONCURRENCY=)
 	$(COMPOSE) exec -T api python -m loadtest.run --requests $(or $(N),2000) --concurrency $(or $(CONCURRENCY),50)

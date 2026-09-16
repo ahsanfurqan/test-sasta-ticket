@@ -1,0 +1,480 @@
+{
+  "info": {
+    "name": "Metered Billing API",
+    "description": "Walks the assessment's definition of done in order: create a customer on Growth, issue a key, serve authenticated traffic, watch usage move, rotate and revoke a key, set a spending limit and see the rupee limit inverted into a request-count threshold.\n\nRun the folders top to bottom the first time — later requests reuse variables the earlier ones capture (customerId, apiKey, secondKeyId).\n\nMoney is integer paisa throughout. Rs. 15,000 is 1500000.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "customerId", "value": "" },
+    { "key": "apiKey", "value": "" },
+    { "key": "apiKeyId", "value": "" },
+    { "key": "secondKey", "value": "" },
+    { "key": "secondKeyId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0 · Is it up",
+      "item": [
+        {
+          "name": "Liveness",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/healthz", "host": ["{{baseUrl}}"], "path": ["healthz"] },
+            "description": "Touches no dependency on purpose. Proves the process is alive, nothing more."
+          }
+        },
+        {
+          "name": "Readiness",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const c = pm.response.json().checks;",
+                  "pm.test('postgres reachable', () => pm.expect(c.postgres).to.eql('ok'));",
+                  "pm.test('redis reachable', () => pm.expect(c.redis).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/readyz", "host": ["{{baseUrl}}"], "path": ["readyz"] },
+            "description": "Dependencies reachable. 503 if either is not."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 · Create a customer and get a key",
+      "item": [
+        {
+          "name": "Create customer on Growth",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('customerId', b.customer_id);",
+                  "pm.collectionVariables.set('apiKey', b.api_key);",
+                  "pm.collectionVariables.set('apiKeyId', b.api_key_id);",
+                  "pm.test('key shown once', () => pm.expect(b.warning).to.include('not recoverable'));",
+                  "pm.test('plan assignment created', () => pm.expect(b.plan_assignment_id).to.be.a('string'));",
+                  "pm.test('billing period opened', () => pm.expect(b.billing_period).to.match(/^\\d{4}-\\d{2}$/));",
+                  "console.log('customer', b.customer_id, '| key', b.api_key);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Acme Travel\",\n  \"plan\": \"Growth\",\n  \"key_label\": \"postman demo\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers"]
+            },
+            "description": "plan is Starter, Growth or Scale.\n\nOne call creates the customer, points them at a published price list version, opens a plan assignment as a time range, opens the billing period, and issues the first key. The key is returned once and is stored only as a SHA-256 digest (ADR-0015).\n\nThis is an admin/demo surface, not a product. Outside a local environment it needs X-Admin-Token."
+          }
+        },
+        {
+          "name": "List the customer's live keys",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.text();",
+                  "pm.test('no key material returned', () => pm.expect(body).to.not.include(pm.collectionVariables.get('apiKey')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{customerId}}/keys",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{customerId}}", "keys"]
+            },
+            "description": "Returns prefixes, not secrets. The test asserts the secret is absent — a key that can be listed back is a key database that is a decryptable secret store."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 · Serve authenticated traffic",
+      "item": [
+        {
+          "name": "Echo — valid key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('billable', () => pm.expect(b.billable).to.be.true);",
+                  "pm.test('names our customer', () => pm.expect(b.customer_id).to.eql(pm.collectionVariables.get('customerId')));",
+                  "pm.test('capture cost header present', () => pm.expect(pm.response.headers.has('x-usage-capture-us')).to.be.true);",
+                  "console.log('capture took', pm.response.headers.get('x-usage-capture-us'), 'microseconds');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{apiKey}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/echo?message=hello",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "echo"],
+              "query": [{ "key": "message", "value": "hello" }]
+            },
+            "description": "The billable endpoint. What it returns is deliberately trivial.\n\nCheck the response headers: x-usage-capture-us is how many microseconds usage capture added to this request, measured per request. That is ADR-0014's 1ms p99 budget made testable rather than asserted."
+          }
+        },
+        {
+          "name": "Echo — no key (401, not billed)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));",
+                  "pm.test('explicitly not billed', () => pm.expect(pm.response.json().billed).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/v1/echo", "host": ["{{baseUrl}}"], "path": ["v1", "echo"] },
+            "description": "ADR-0007: 401 is never billed. Billing unauthenticated requests would let anyone guessing at a key run up a stranger's bill."
+          }
+        },
+        {
+          "name": "Echo — wrong key (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('401', () => pm.response.to.have.status(401));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "mk_deadbeef_not-a-real-key" }],
+            "url": { "raw": "{{baseUrl}}/v1/echo", "host": ["{{baseUrl}}"], "path": ["v1", "echo"] },
+            "description": "The negative result is cached too, so spraying invalid keys cannot turn into one Postgres read per request."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 · Watch usage move",
+      "item": [
+        {
+          "name": "Usage this period",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('counted the billable calls', () => pm.expect(b.billable_requests).to.be.above(0));",
+                  "pm.test('401s did not increment it', () => pm.expect(b.billable_requests).to.eql(2));",
+                  "console.log('billable so far:', b.billable_requests, '| threshold:', b.request_threshold);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{customerId}}/usage",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{customerId}}", "usage"]
+            },
+            "description": "Read straight off the Redis counter, so it is near-current rather than a day behind.\n\nExpect 2 at this point: the two successful echoes. The two 401s are counted separately as non-billable and never touch this number."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 · Key rotation and revocation",
+      "item": [
+        {
+          "name": "Issue a second key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('secondKey', b.api_key);",
+                  "pm.collectionVariables.set('secondKeyId', b.api_key_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"label\": \"rotation\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{customerId}}/keys",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{customerId}}", "keys"]
+            },
+            "description": "Multiple keys live at once (ADR-0015). Rotation is: issue new, migrate traffic, revoke old — no cutover, no downtime, which is what makes rotation something customers actually do."
+          }
+        },
+        {
+          "name": "Echo with the second key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('same customer, different key', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.customer_id).to.eql(pm.collectionVariables.get('customerId'));",
+                  "  pm.expect(b.api_key_id).to.eql(pm.collectionVariables.get('secondKeyId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{secondKey}}" }],
+            "url": { "raw": "{{baseUrl}}/v1/echo", "host": ["{{baseUrl}}"], "path": ["v1", "echo"] },
+            "description": "Both keys work. Usage names which key served the request, so 'which of my keys caused this spike?' stays answerable."
+          }
+        },
+        {
+          "name": "Revoke the second key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('revoked', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));",
+                  "console.log('Revoked. The next request re-run will still succeed for up to 30s — that is the stated cache TTL, not a bug.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/keys/{{secondKeyId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "keys", "{{secondKeyId}}"]
+            },
+            "description": "Revocation is a timestamp, never a DELETE, so a charge from a key that no longer exists is still traceable."
+          }
+        },
+        {
+          "name": "Echo with the revoked key — the 30s window",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Both outcomes are correct. Which one you get depends on where in the",
+                  "// 30-second auth cache TTL the revocation landed (ADR-0015).",
+                  "pm.test('200 inside the window, 401 after it', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 401]);",
+                  "});",
+                  "console.log(pm.response.code === 200",
+                  "  ? 'Still inside the 30s revocation window. Wait 30s and re-send to see it become 401.'",
+                  "  : 'Cache entry expired: the revoked key is now rejected.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{secondKey}}" }],
+            "url": { "raw": "{{baseUrl}}/v1/echo", "host": ["{{baseUrl}}"], "path": ["v1", "echo"] },
+            "description": "The most interesting request in this collection.\n\nA revoked key keeps working until its cached entry expires — up to 30 seconds. That is the price of keeping authentication off Postgres on the hot path, and it is stated and tested rather than accidental. Send this immediately after revoking, then again 30 seconds later."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 · Spending limit",
+      "item": [
+        {
+          "name": "Set a Rs. 10,000 limit",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('rupee limit was inverted into a request count', () => {",
+                  "  pm.expect(b.request_threshold).to.be.a('number');",
+                  "});",
+                  "// Re-derive the threshold independently. If this passes, the inversion is right.",
+                  "const headroom = b.limit_paisa - b.prorated_fee_paisa;",
+                  "const expected = b.prorated_included_requests + Math.floor(headroom / 50);",
+                  "pm.test('threshold = prorated allowance + headroom / Rs.0.50', () => {",
+                  "  pm.expect(b.request_threshold).to.eql(expected);",
+                  "});",
+                  "console.log(`Rs.${b.limit_paisa/100} limit -> ${b.request_threshold} requests`);",
+                  "console.log(`fee ${b.prorated_fee_paisa} paisa + allowance ${b.prorated_included_requests} over ${b.days_in_period}/${b.days_in_month} days`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"limit_paisa\": 1000000\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{customerId}}/spending-limit",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{customerId}}", "spending-limit"]
+            },
+            "description": "1000000 paisa = Rs. 10,000. The limit caps the TOTAL bill including the monthly fee (ADR-0012).\n\nThe response shows the whole derivation: prorated fee, prorated allowance, days elapsed, and the request count the limit becomes. The hot path never sees any of it — it compares two integers.\n\nThe test re-derives the threshold from the parts, so it fails if the inversion drifts."
+          }
+        },
+        {
+          "name": "Reject a limit below the monthly fee",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422', () => pm.response.to.have.status(422));",
+                  "pm.test('the message names the fee', () => {",
+                  "  pm.expect(pm.response.json().detail).to.include('monthly fee');",
+                  "});",
+                  "console.log(pm.response.json().detail);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"limit_paisa\": 100\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{customerId}}/spending-limit",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{customerId}}", "spending-limit"]
+            },
+            "description": "Rs. 1 against a Growth plan. Such a limit can never be satisfied — the customer would be refused from their first request — so it is refused at the moment it is set, with a message naming the fee, rather than becoming a silent surprise at month end."
+          }
+        },
+        {
+          "name": "Usage now shows the threshold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.test('threshold is live on the hot path', () => pm.expect(b.request_threshold).to.be.a('number'));",
+                  "pm.test('not over the limit yet', () => pm.expect(b.over_limit).to.be.false);",
+                  "console.log(`${b.billable_requests} of ${b.request_threshold} requests used`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{customerId}}/usage",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{customerId}}", "usage"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6 · Cross the limit (Collection Runner)",
+      "item": [
+        {
+          "name": "Echo — run this one N times",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('served or refused, never anything else', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 402]);",
+                  "});",
+                  "if (pm.response.code === 402) {",
+                  "  const b = pm.response.json();",
+                  "  pm.test('refusal is not billed', () => pm.expect(b.billed).to.be.false);",
+                  "  console.log(`REFUSED at ${b.requests_served} of ${b.request_threshold}`);",
+                  "  postman.setNextRequest(null); // stop the run on the first refusal",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-API-Key", "value": "{{apiKey}}" }],
+            "url": { "raw": "{{baseUrl}}/v1/echo", "host": ["{{baseUrl}}"], "path": ["v1", "echo"] },
+            "description": "Select ONLY this folder in the Collection Runner and set iterations above the threshold from folder 5.\n\nThe run stops itself on the first 402. A refusal is not billed, so the counter stops moving and the state is stable rather than oscillating.\n\nNote: on Growth the prorated allowance alone is hundreds of thousands of requests, so a realistic Postman run needs a Starter customer created late in the month, or use `make load-test` instead — Postman is the wrong tool for six figures of traffic."
+          }
+        }
+      ]
+    }
+  ]
+}

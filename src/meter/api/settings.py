@@ -42,6 +42,10 @@ class HotPathSettings:
     #: ADR-0015: revocation is effective within this window, because this is how long a
     #: resolved key lives in the auth cache.
     auth_cache_ttl_seconds: int = 30
+    # ADR-0019: how long a POSITIVE auth entry may be served after its TTL, but only while
+    # Postgres is unreachable. This is the revocation window during an outage, so it is a
+    # security parameter -- raising it erodes ADR-0015's guarantee by increments.
+    auth_stale_ceiling_seconds: int = 900
 
     #: ADR-0014's baseline mode. Off = no limit check, no counter, no XADD.
     capture_enabled: bool = True
@@ -61,6 +65,7 @@ class HotPathSettings:
     def from_env(cls) -> HotPathSettings:
         return cls(
             auth_cache_ttl_seconds=_int_env("AUTH_CACHE_TTL_SECONDS", 30),
+            auth_stale_ceiling_seconds=_int_env("AUTH_STALE_CEILING_SECONDS", 900),
             capture_enabled=_bool_env("CAPTURE_ENABLED", True),
             retry_after_seconds=_int_env("RETRY_AFTER_SECONDS", 1),
             admin_token=os.environ.get("ADMIN_TOKEN") or None,

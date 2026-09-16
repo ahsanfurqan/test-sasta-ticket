@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 
 import httpx
 import pytest
@@ -134,7 +135,10 @@ def authorised_store(**extra) -> dict:
     """A Redis keyspace in which SECRET is a live key and the counters are trustworthy."""
     digest = keys_repo.hash_key(SECRET)
     store = {
-        keys_repo.auth_cache_key(digest): f"{CUSTOMER}|{KEY_ID}|{digest}",
+        # ADR-0019: an entry carries its freshness deadline. Seed it comfortably fresh, or
+        # the hot path treats it as stale and goes to Postgres -- which is the point of the
+        # invariant these tests assert.
+        keys_repo.auth_cache_key(digest): f"{CUSTOMER}|{KEY_ID}|{digest}|{time.time() + 3600:.0f}",
         usage_repo.COUNTERS_AUTHORITATIVE: "1",
     }
     store.update(extra)

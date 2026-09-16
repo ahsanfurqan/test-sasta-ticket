@@ -126,6 +126,7 @@ make down        # stop and remove containers (add VOLUMES=1 to drop data)
 make migrate     # alembic upgrade head
 make test        # pytest inside the api container
 make lint        # ruff + import-linter (enforces the domain purity seam)
+make test-outage # prove ADR-0019 by actually stopping Postgres (runs on the host)
 make load-test   # local traffic harness against /v1/echo
 make logs        # tail all services
 make psql        # psql shell into postgres
@@ -154,10 +155,11 @@ any of these without a superseding ADR.**
 | Redis down | **Fail closed** — `503`, no Postgres fallback. Makes the overshoot bound unconditional; costs full availability. | 0011 |
 | Corrections | **Credit notes**, never edits. Immutability enforced in the schema now; the mechanism is **not built in v1** and is a stated gap. | 0013 |
 | Latency budget | Capture adds **≤1ms at p99**, measured with capture toggled off and on. | 0014 |
-| API keys | **Multiple** per customer, stored **hashed**, shown once. Revocation effective **within 30s**. | 0015 |
+| API keys | **Multiple** per customer, stored **hashed**, shown once. Revocation effective **within 30s** -- except during a Postgres outage, when it stretches to the stale ceiling (0019). | 0015, 0019 |
 | Partial periods | A mid-month signup or cancellation prorates exactly like a plan change. | 0017 |
 | Capture ordering | Usage is written to Redis **after the handler, before the response is sent**. A process that dies before capture also died before the customer got an answer, so their retry *is* the request. **No in-process batching** -- it would reopen the window this closes. | 0018 |
 | Postgres down | Keep serving (Redis can still count and enforce); the stream buffers to a **bounded** size, then fails closed. Thresholds go stale meanwhile -- alert on threshold age, not just on Postgres health. | 0018 |
+| Auth during that outage | Positive auth entries are served **stale** past their freshness deadline while Postgres is unreachable. Negatives never go stale. Without this, ADR-0018's "keep serving" lasts exactly 30 seconds. | 0019 |
 | Retention | Per-request rows **90 days**; rollups long-term, written at aggregation time. Usage table partitioned so expiry is a partition drop. | 0016 |
 
 ### Consequences worth holding in mind

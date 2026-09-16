@@ -42,7 +42,6 @@ from datetime import UTC, datetime
 from time import perf_counter
 
 from redis.exceptions import RedisError
-from sqlalchemy.exc import SQLAlchemyError
 
 from meter.api import auth
 from meter.api.context import HotPathContext
@@ -247,14 +246,13 @@ class UsageMeteringMiddleware:
             logger.warning("redis unreachable caching auth: %s", type(exc).__name__)
             await self._unavailable(send, "redis_unreachable")
             return
-        except (SQLAlchemyError, TimeoutError, OSError) as exc:
-            # A key not already in the cache cannot be resolved while Postgres is down.
-            # ADR-0018 says a Postgres outage keeps serving, and for counting and enforcing
-            # that is true -- but not for AUTH: once a key's 30s cache entry (ADR-0015)
-            # expires there is nowhere else to resolve it from. So a Postgres outage does
-            # take the API down, about 30 seconds late. The two ADRs disagree, and this
-            # line is where the disagreement surfaces.
-            logger.warning("cannot resolve an uncached key: %s", type(exc).__name__)
+        except auth.PostgresUnavailable as exc:
+            # Postgres is down AND this key had no positive entry to serve stale (ADR-0019):
+            # either it was never cached, or its stale ceiling has passed, or it is a
+            # negative entry -- which never goes stale, because an outage must not turn
+            # "no such key" into "maybe". A key that WAS cached keeps working; new keys and
+            # new customers cannot authenticate until the directory returns.
+            logger.warning("cannot resolve an uncached key: %s", exc)
             await self._unavailable(send, "key_directory_unavailable")
             return
 

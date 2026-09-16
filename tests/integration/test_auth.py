@@ -79,7 +79,9 @@ async def test_a_tampered_cache_entry_is_refused():
     entry that does not match the key presented resolves to nobody."""
     digest = keys_repo.hash_key(SECRET)
     store = authorised_store()
-    store[keys_repo.auth_cache_key(digest)] = f"{CUSTOMER}|{KEY_ID}|{'0' * 64}"
+    store[keys_repo.auth_cache_key(digest)] = (
+        f"{CUSTOMER}|{KEY_ID}|{'0' * 64}|{time.time() + 3600:.0f}"
+    )
     middleware = UsageMeteringMiddleware(app_returning(200), make_context(FakeRedis(store)))
 
     assert status_of(await call(middleware)) == 401
@@ -89,7 +91,7 @@ def test_the_cache_encoding_holds_a_digest_and_never_a_key():
     record = keys_repo.KeyRecord(
         key_id=KEY_ID, customer_id=CUSTOMER, key_hash=keys_repo.hash_key(SECRET), revoked_at=None
     )
-    encoded = auth.encode(record)
+    encoded = auth.encode(record, time.time() + 30)
     assert SECRET not in encoded
     assert auth.decode(encoded, record.key_hash) == auth.Caller(CUSTOMER, KEY_ID)
     assert auth.decode(encoded, keys_repo.hash_key("another-key")) is None
@@ -148,10 +150,12 @@ def test_a_customer_may_hold_several_live_keys(base_url, customer):
 
 
 def test_revocation_is_bounded_by_the_auth_cache_ttl(base_url, customer, redis_client):
-    """The window is 30 seconds, and this asserts it against the TTL Redis is holding.
+    """The window is 30 seconds, asserted against the freshness deadline in the cached value.
 
-    Deleting the cached entry afterwards stands in for that TTL elapsing -- the assertion
-    that matters is the one above it: the entry cannot outlive the stated window.
+    Since ADR-0019 the Redis TTL is the STALE CEILING, not the revocation window: a positive
+    entry outlives its freshness so that it can be served stale during a Postgres outage. The
+    window that ADR-0015 promises is the deadline carried inside the value, and that is what
+    this asserts. Deleting the entry afterwards stands in for the deadline passing.
     """
     issued = httpx.post(
         f"{base_url}/admin/customers/{customer['customer_id']}/keys",
@@ -171,8 +175,12 @@ def test_revocation_is_bounded_by_the_auth_cache_ttl(base_url, customer, redis_c
     assert revoked.json()["effective_within_seconds"] == 30
 
     cache_key = keys_repo.auth_cache_key(keys_repo.hash_key(issued["api_key"]))
+
+    remaining = auth.fresh_until(redis_client.get(cache_key)) - time.time()
+    assert 0 < remaining <= 30, "a revoked key must not stay FRESH beyond 30s (ADR-0015)"
+
     ttl = redis_client.ttl(cache_key)
-    assert 0 < ttl <= 30, "a revoked key must not outlive the stated 30s window (ADR-0015)"
+    assert 30 < ttl <= 900, "the Redis TTL is the stale ceiling, not the window (ADR-0019)"
 
     redis_client.delete(cache_key)
     after = httpx.get(
@@ -236,3 +244,4 @@ def test_the_development_key_is_an_ordinary_hashed_key(base_url, api_key):
     response = httpx.get(f"{base_url}/v1/echo", headers={"X-API-Key": api_key}, timeout=10)
     assert response.status_code == 200
     assert response.json()["customer_id"], "the dev key resolves to a real customer row"
+
