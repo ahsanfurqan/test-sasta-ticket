@@ -67,6 +67,79 @@ shows capture dominating, that is the lever.
 **Also:** `x-usage-capture-us` is the measurement instrument and currently ships on every
 customer response. It should go behind a flag before this is public.
 
+### A drifted Redis counter is never repaired while Redis is up
+
+The per-period request counter is incremented in the same Redis pipeline as the usage
+capture, so the counter and the stream cannot drift from each other at write time. What has
+no repair path is drift that appears any other way — a partially applied pipeline, an `INCR`
+that lands while its `XADD` does not, an operator poking the key.
+
+Correction only ever happens through `counters.rebuild()`, which authoritatively `SET`s each
+counter from `count(*)` over `usage_events`. And the watchdog only calls it when the
+authoritative marker is **missing**:
+
+```python
+if await is_authoritative(redis):
+    return None      # Redis is up and primed -> no rebuild, ever
+```
+
+So the only thing that repairs a counter is a Redis restart.
+
+Reconciliation would *detect* it — that is what `unexplained = (redis − postgres) − undrained`
+is for — but `reconcile.py` contains no write of any kind. It reports; it does not repair. And
+it only runs at month close or when a human asks (see below).
+
+**Why it matters more than it looks:** the counter is what the spending-limit gate compares
+against. Too high cuts a customer off early; too low serves them past a limit they set. Either
+way it stays invisible until a period is closed, and at that point it is recorded as a
+discrepancy rather than fixed.
+
+The fix is small, because `rebuild()` already does exactly the right thing per customer. What
+is missing is a trigger that is not "Redis died" — either a periodic reconcile sweep that
+repairs on drift, or letting the existing watchdog re-prime individual counters.
+
+### Counter keys are never expired, in the component that fails closed on memory
+
+Counter keys are per customer per period — `usage:count:<customer>:<YYYY-MM>` — so a new month
+creates a new key and the old one is simply left behind:
+
+```
+sample key:  usage:count:3c3e59e3-…:2026-12
+TTL:         -1          (never expires)
+keys now:    8701
+```
+
+At 10,000 customers that is 120,000 dead keys a year, growing without bound, in the component
+that ADR-0021 names as **the first ceiling this design hits** and that ADR-0011 makes fail the
+entire API closed when it runs out of memory.
+
+The current volume is nothing. The shape is the problem: unbounded growth in the exact
+resource the design says breaks first, with nothing in the system reclaiming it.
+
+Fix: set a TTL when the key is created, comfortably longer than the period plus the month
+close grace window, so a closed month's counters expire on their own. The threshold keys want
+the same treatment and have not been checked.
+
+### Reconciliation is not on a schedule
+
+It runs in exactly two places: as the gate before an invoice is issued (`close.py` loops
+drain → aggregate → reconcile until it converges or the grace window expires, per ADR-0010),
+and on demand via `cli reconcile` or `GET /ops/reconcile/{customer_id}`.
+
+The worker runs five background loops — drain, aggregate, thresholds, watchdog, close — and
+**none of them is reconciliation**. So between month closes, nothing is checking that Redis
+and Postgres agree.
+
+This is defensible as built: the drain acks only after the commit, the idempotency key makes
+redelivery safe, and 14 real process kills lost nothing. Reconciliation is the proof, and it
+is demanded at the moment it matters — before money is committed to a document that can never
+be changed.
+
+But "we would find out at month end" is a long feedback loop for a silent divergence, and
+`unexplained ≠ 0` is exactly the kind of thing worth paging on within minutes rather than
+weeks. A periodic sweep over active customers would reuse `reconcile.reconcile` unchanged and
+slot in beside the existing `thresholds` loop.
+
 ### A Redis process crash can still lose about a second of usage
 
 Redis runs `appendonly yes`, which fsyncs once a second. So the guarantee is precisely *"no
@@ -101,11 +174,12 @@ behind it.
 
 ## Not tested
 
-### The CLI has no test coverage
+### The CLI is only tested for reachability
 
-`meter.pipeline.cli` is the operational entry point for every manual trigger — drain,
-reconcile, close, rebuild counters. It has no tests. This is not theoretical: a refactor
-broke its imports and **nothing in the suite caught it**; it was found by running it by hand.
+`tests/integration/test_cli.py` proves every subcommand imports, parses and dispatches — the
+class of bug that previously got through, when a refactor broke the CLI's imports and the
+whole suite stayed green. It does **not** test what the stages do; that is covered against
+the real container by `test_drain`, `test_reconciliation` and `test_invoicing`.
 
 ### The real-time revocation test is skipped by default
 
@@ -147,6 +221,10 @@ outside `pytest`, so it does not run in `make test` and will rot if nobody remem
    ([ADR-0016](adr/0016-usage-retention-and-partitioning.md)). After that a charge is
    explainable but not itemisable, and a rollup bug found on day 91 is unrecoverable. That is
    a compliance question as much as a technical one.
-6. **What is the SLO?** Redis is in the critical path for availability, latency and
+6. **Who is watching the counter between month closes?** A drifted counter misenforces a
+   spending limit, and today nothing detects or repairs it until a period is closed. Deciding
+   how quickly that must be caught decides whether a periodic reconcile sweep is worth its
+   cost.
+7. **What is the SLO?** Redis is in the critical path for availability, latency and
    enforcement. Our availability is now bounded by its, and nobody has reviewed that
    commercially.
