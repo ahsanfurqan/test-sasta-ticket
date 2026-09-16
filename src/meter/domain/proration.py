@@ -9,7 +9,9 @@ monthly fee and the included allowance are prorated by whole days:
 
 Usage in a segment is rated against that segment's own prorated allowance and its own
 prorated band ladder. Band WIDTHS scale with time; band PRICES do not -- a price per
-request has no time dimension (ADR-0017). The day of the change belongs to the NEW plan (ADR-0006). Days in the month are the
+request has no time dimension (ADR-0017).
+
+The day of the change belongs to the NEW plan (ADR-0006). Days in the month are the
 actual calendar days, 28-31, and they arrive as an integer input -- this module never sees a
 clock or a timezone (ADR-0009 resolves "the 18th" before it gets here).
 

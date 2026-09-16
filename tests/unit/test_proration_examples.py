@@ -217,13 +217,11 @@ class TestTheLadderRestartsAtEverySegmentBoundary:
         """ADR-0017's stated remainder: bounds round up per segment, so splitting can only
         ever be cheaper, never dearer, and only by a sliver. Pinned rather than tolerated."""
         for segments in ([17, 13], [10, 10, 10], [7, 7, 8, 8]):
+            each = 1_000_000 // len(segments)
             period = rate_period(
-                [
-                    Segment(GROWTH_V1, days=d, days_in_month=30, quantity=1_000_000 // len(segments))
-                    for d in segments
-                ]
+                [Segment(GROWTH_V1, days=d, days_in_month=30, quantity=each) for d in segments]
             )
-            unsplit = rate(1_000_000 // len(segments) * len(segments), GROWTH_V1)
+            unsplit = rate(each * len(segments), GROWTH_V1)
             difference = period.total_paisa - unsplit.total_paisa
             assert difference <= 0, f"{segments} penalised the customer by {difference}"
 
