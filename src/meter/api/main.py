@@ -24,7 +24,7 @@ from fastapi import FastAPI
 
 from meter.api.context import HotPathContext
 from meter.api.metering import UsageMeteringMiddleware
-from meter.api.routes import admin, echo
+from meter.api.routes import account, admin, echo
 from meter.api.settings import HotPathSettings
 from meter.config import Settings, get_settings
 from meter.ops import counters, health
@@ -147,6 +147,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(admin.router)
     app.include_router(echo.router)
+    app.include_router(account.router)
     return app
 
 

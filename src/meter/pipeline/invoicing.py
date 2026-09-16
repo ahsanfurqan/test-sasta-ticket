@@ -30,11 +30,11 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from meter import segments
 from meter.domain.plans import PriceList
 from meter.domain.proration import prorate, rate_period
 from meter.domain.rating import FEE, INCLUDED, USAGE, Charge, rate
 from meter.money import format_paisa
-from meter.pipeline import segments
 from meter.storage.repositories import invoices, periods, rollups
 
 logger = logging.getLogger("meter.pipeline.invoicing")

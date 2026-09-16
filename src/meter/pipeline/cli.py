@@ -29,10 +29,10 @@ import asyncio
 import logging
 from datetime import date
 
+from meter import billing_calendar as clock
 from meter.config import get_settings
 from meter.pipeline import (
     aggregate,
-    clock,
     close,
     counters,
     drain,

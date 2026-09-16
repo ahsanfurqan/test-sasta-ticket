@@ -30,7 +30,7 @@ class Cell:
     """One (customer, local day) rollup cell, with its UTC bounds already resolved.
 
     The bounds arrive resolved because `meter.storage` must not know about timezones
-    beyond the SQL above -- the conversion happens once, in `meter.pipeline.clock`.
+    beyond the SQL above -- the conversion happens once, in `meter.billing_calendar`.
     """
 
     customer_id: str

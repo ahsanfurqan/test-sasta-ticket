@@ -1,4 +1,8 @@
-"""Billing boundaries, resolved in Asia/Karachi (ADR-0009).
+"""Billing period boundaries in Asia/Karachi (ADR-0009).
+
+Below both `meter.api` and `meter.pipeline`: a month boundary that two layers disagree
+about is a month boundary that misassigns usage, so there is one implementation.
+Billing boundaries, resolved in Asia/Karachi (ADR-0009).
 
 Storage is UTC; *boundaries* are evaluated in the customer's billing timezone, and the
 resolved instants are what everything downstream compares. This module is the only place

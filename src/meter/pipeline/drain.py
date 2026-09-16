@@ -47,8 +47,9 @@ from redis.exceptions import ResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from meter import billing_calendar as clock
 from meter.config import Settings
-from meter.pipeline import clock, keys
+from meter.pipeline import keys
 from meter.pipeline.events import MalformedEvent, UsageEventRecord, parse
 from meter.storage.repositories import periods, rollups
 

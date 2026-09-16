@@ -1,4 +1,13 @@
-"""Turning stored facts into the domain's proration segments. ADR-0006, ADR-0017.
+"""Resolving a billing period into proration segments.
+
+Below both `meter.api` and `meter.pipeline` on purpose (see `pyproject.toml`'s layers
+contract). Both need the same answer to "which plans did this customer hold, for how many
+days, with how much usage" -- the live usage endpoint and the invoice run must agree to the
+paisa, and the way to guarantee that is one implementation, not two that look alike.
+
+It reads through `meter.storage` repositories and returns `meter.domain` value objects; it
+performs no rating itself.
+Turning stored facts into the domain's proration segments. ADR-0006, ADR-0017.
 
 `data-model` stores plan assignments as non-overlapping time ranges. `billing-domain` rates
 a tuple of `Segment(price_list, days, days_in_month, quantity)`. This module is the join
@@ -26,12 +35,12 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from meter import billing_calendar as clock
 from meter.domain.plans import PriceList
 from meter.domain.proration import Segment
-from meter.pipeline import clock
 from meter.storage.repositories import periods, rollups
 
-logger = logging.getLogger("meter.pipeline.segments")
+logger = logging.getLogger("meter.segments")
 
 
 @dataclass(frozen=True, slots=True)

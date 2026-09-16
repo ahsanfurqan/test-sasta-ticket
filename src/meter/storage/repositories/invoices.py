@@ -30,6 +30,8 @@ class InvoiceRow:
     status: str
     total_paisa: int
     issued_at: datetime | None
+    #: Present only on the customer-facing reads, which join the period to name the month.
+    period_month: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,7 @@ def _invoice_row(row) -> InvoiceRow:
         status=row.status,
         total_paisa=int(row.total_paisa),
         issued_at=row.issued_at,
+        period_month=getattr(row, "period_month", None),
     )
 
 
@@ -153,6 +156,41 @@ async def issue(conn: AsyncConnection, invoice_id: str, total_paisa: int) -> Non
         ),
         {"id": invoice_id, "total": total_paisa},
     )
+
+
+_LIST_FOR_CUSTOMER = text(
+    """
+    SELECT i.id::text AS id, i.customer_id::text AS customer_id,
+           i.billing_period_id::text AS billing_period_id, i.invoice_number,
+           i.status, i.total_paisa, i.issued_at, bp.period_month
+      FROM invoices i
+      JOIN billing_periods bp ON bp.id = i.billing_period_id
+     WHERE i.customer_id = :customer_id
+     ORDER BY bp.period_month DESC
+    """
+)
+_BY_NUMBER = text(
+    """
+    SELECT i.id::text AS id, i.customer_id::text AS customer_id,
+           i.billing_period_id::text AS billing_period_id, i.invoice_number,
+           i.status, i.total_paisa, i.issued_at, bp.period_month
+      FROM invoices i
+      JOIN billing_periods bp ON bp.id = i.billing_period_id
+     WHERE i.invoice_number = :invoice_number
+    """
+)
+
+
+async def list_for_customer(conn: AsyncConnection, customer_id: str) -> list[InvoiceRow]:
+    """Every invoice this customer has, newest period first."""
+    rows = (await conn.execute(_LIST_FOR_CUSTOMER, {"customer_id": customer_id})).all()
+    return [_invoice_row(row) for row in rows]
+
+
+async def get_by_number(conn: AsyncConnection, invoice_number: str) -> InvoiceRow | None:
+    """One invoice by its customer-visible number."""
+    row = (await conn.execute(_BY_NUMBER, {"invoice_number": invoice_number})).first()
+    return _invoice_row(row) if row else None
 
 
 async def lines_for(conn: AsyncConnection, invoice_id: str) -> list[LineRow]:

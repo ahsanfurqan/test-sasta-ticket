@@ -28,9 +28,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from meter import billing_calendar as clock
 from meter.config import get_settings
 from meter.domain.catalogue import GROWTH_V1, SCALE_V1, STARTER_V1
-from meter.pipeline import clock, close, invoicing, keys
+from meter.pipeline import close, invoicing, keys
 from meter.storage.repositories import invoices, periods
 from tests.integration.test_drain import (  # noqa: F401  (fixtures are used by name)
     burst,

@@ -39,7 +39,8 @@ from datetime import date
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from meter.pipeline import clock, drain, keys
+from meter import billing_calendar as clock
+from meter.pipeline import drain, keys
 from meter.storage.repositories import periods, rollups
 
 logger = logging.getLogger("meter.pipeline.reconcile")

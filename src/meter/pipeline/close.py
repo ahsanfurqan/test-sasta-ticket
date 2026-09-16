@@ -34,8 +34,9 @@ from datetime import date
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from meter import billing_calendar as clock
 from meter.config import Settings
-from meter.pipeline import aggregate, clock, drain, invoicing, reconcile
+from meter.pipeline import aggregate, drain, invoicing, reconcile
 from meter.pipeline.reconcile import Reconciliation
 from meter.storage.repositories import invoices as invoice_repo
 from meter.storage.repositories import periods

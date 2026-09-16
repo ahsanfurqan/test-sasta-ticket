@@ -27,10 +27,11 @@ import redis.asyncio as aioredis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from meter import billing_calendar as clock
 from meter.config import Settings, get_settings
 from meter.domain.catalogue import GROWTH_V1
 from meter.domain.plans import PriceList
-from meter.pipeline import clock, keys
+from meter.pipeline import keys
 from meter.pipeline.drain import Drain
 from meter.pipeline.events import UsageEventRecord, encode
 from meter.storage import cache, db

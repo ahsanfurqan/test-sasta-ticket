@@ -30,7 +30,8 @@ import redis.asyncio as aioredis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from meter.pipeline import clock, drain
+from meter import billing_calendar as clock
+from meter.pipeline import drain
 from meter.storage.repositories import periods, rollups
 
 logger = logging.getLogger("meter.pipeline.aggregate")

@@ -76,7 +76,17 @@ name = "layers - api and pipeline sit above storage above domain"
 type = "layers"
 layers = [
     "meter.api | meter.pipeline",
+    "meter.segments",
     "meter.storage",
     "meter.domain",
 ]
 exhaustive = false
+
+# The live usage endpoint and the invoice run must agree to the paisa, so they resolve a
+# period into segments through ONE implementation. This contract is what stops a second one
+# growing inside either layer the next time somebody needs "just the current segment".
+[[tool.importlinter.contracts]]
+name = "segment resolution is shared, not reimplemented per layer"
+type = "forbidden"
+source_modules = ["meter.segments", "meter.billing_calendar"]
+forbidden_modules = ["meter.api", "meter.pipeline"]

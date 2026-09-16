@@ -54,6 +54,17 @@ logger = logging.getLogger(__name__)
 #: not: health checks are not billable traffic and provisioning is not a product surface.
 METERED_PREFIX = "/v1/"
 
+#: Authenticated but NOT billable. ADR-0007 defines a billable request as one we
+#: authenticated and processed, which read literally would charge a customer for asking what
+#: they owe. That is the same objection that ruled out billing a request refused for hitting
+#: a spending limit: being told your own balance is not a thing to be charged for. These
+#: still authenticate, still enforce, and still count toward nothing.
+UNBILLED_PATHS = ("/v1/usage", "/v1/invoices")
+
+
+def _is_billable_path(path: str) -> bool:
+    return not any(path == p or path.startswith(p + "/") for p in UNBILLED_PATHS)
+
 # ---------------------------------------------------------------------------------------
 # ADR-0007: what counts. The status-code list is deliberate and maintained, not a category.
 # ---------------------------------------------------------------------------------------
@@ -327,7 +338,9 @@ class UsageMeteringMiddleware:
                 return
 
             started = perf_counter()
-            if outcome.billable:
+            # An account endpoint is authenticated and enforced like any other, but never
+            # billed: a customer is not charged for asking what they owe.
+            if outcome.billable and _is_billable_path(scope["path"]):
                 try:
                     await self._capture(
                         caller=caller,

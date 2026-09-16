@@ -37,7 +37,7 @@ prevent exactly that.
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from meter.pipeline import clock
+from meter import billing_calendar as clock
 
 # Mirrors the `usage_outcome` enum in the schema. Kept as a tuple rather than imported
 # from the ORM so a malformed value is rejected here, at the edge, with a useful message.

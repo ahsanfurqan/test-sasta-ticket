@@ -136,6 +136,12 @@ make redis-cli   # redis-cli shell
 API is on `http://localhost:8000`. Auth is `X-API-Key`. The dev key lives in `.env`
 (copy `.env.example`).
 
+Customer-facing: `GET /v1/echo` (billable), `GET /v1/usage`, `GET /v1/invoices`,
+`GET /v1/invoices/{number}`. The account endpoints authenticate and enforce like any other
+but are **not billed** -- a customer is not charged for asking what they owe, which is the
+same objection that ruled out billing a request refused for hitting a spending limit.
+Admin/demo surface is under `/admin`.
+
 ## Decisions already made
 
 All 11 open questions are resolved. Full reasoning, alternatives, costs and breaking points

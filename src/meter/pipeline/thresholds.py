@@ -38,10 +38,12 @@ import redis.asyncio as aioredis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from meter import billing_calendar as clock
+from meter import segments
 from meter.domain.proration import prorate
 from meter.domain.rating import max_quantity_within, rate
 from meter.money import Paisa, format_paisa
-from meter.pipeline import clock, keys, segments
+from meter.pipeline import keys
 from meter.storage.repositories import periods
 
 logger = logging.getLogger("meter.pipeline.thresholds")

@@ -28,8 +28,9 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from sqlalchemy import text
 
+from meter import billing_calendar as clock
 from meter.domain.catalogue import GROWTH_V1, SCALE_V1
-from meter.pipeline import aggregate, clock, counters, keys, reconcile, thresholds
+from meter.pipeline import aggregate, counters, keys, reconcile, thresholds
 from meter.storage.repositories import periods, rollups
 from tests.integration.test_drain import (  # noqa: F401  (fixtures are used by name)
     burst,
